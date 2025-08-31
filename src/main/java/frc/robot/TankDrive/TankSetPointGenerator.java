@@ -42,8 +42,9 @@ public class TankSetPointGenerator {
                                      maxStepRight);
 
         // Ensure the new speeds do not exceed the maximum allowed speeds
-        newLeft = Math.min(newLeft, limits.maxLinearVelocity().magnitude());
-        newRight = Math.min(newRight, limits.maxLinearVelocity().magnitude());
+        double maxSpeed = limits.maxLinearVelocity().magnitude();
+        newLeft = Math.max(-maxSpeed, Math.min(newLeft, maxSpeed));
+        newRight = Math.max(-maxSpeed, Math.min(newRight, maxSpeed));
 
         return new TankSetPoint(new DifferentialDriveWheelSpeeds(newLeft, newRight));
     }
