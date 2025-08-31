@@ -13,7 +13,7 @@ tmp/
 *~.nib
 local.properties
 .settings/
-src\main\java\frc\robot\BuildConstants.java
+BuildConstants.java
 .loadpath
 .recommenders
 
