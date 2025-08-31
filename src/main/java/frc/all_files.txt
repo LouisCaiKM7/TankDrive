@@ -1,0 +1,3338 @@
+
+
+Problems analysis:
+
+can't stop after pressed s, j and l keys, won't react when pressing w key.(single use drivetrain haha)
+
+ntparams keep refreshing because the isanyChanged is always true , need to fix this.
+
+not verified poseestimator and odometry.
+
+not verified commands
+
+==== NTParameter.java ====
+package lib.ntext;
+
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+
+@Retention(RetentionPolicy.CLASS)
+@Target(ElementType.TYPE)
+public @interface NTParameter {
+    String tableName() default "NTParameter";
+}
+
+
+==== NTParameterProcessor.java ====
+package lib.ntext;
+
+import com.google.auto.service.AutoService;
+
+import javax.annotation.processing.*;
+import javax.lang.model.SourceVersion;
+import javax.lang.model.element.*;
+import javax.lang.model.util.ElementFilter;
+import javax.tools.Diagnostic;
+import javax.tools.JavaFileObject;
+import java.io.IOException;
+import java.io.Writer;
+import java.util.*;
+
+@SupportedAnnotationTypes({"lib.ntext.NTParameter"})
+@SupportedSourceVersion(SourceVersion.RELEASE_17)
+@SupportedOptions("DEBUG")
+@AutoService(Processor.class)
+public class NTParameterProcessor extends AbstractProcessor {
+    private static final Map<String, String> NT_TYPES_TABLE = Map.ofEntries(
+            // Booleans
+            Map.entry("boolean", "Boolean"), Map.entry("java.lang.Boolean", "Boolean"),
+            Map.entry("boolean[]", "Boolean[]"), Map.entry("java.lang.Boolean[]", "Boolean[]"),
+
+            // Integers
+            Map.entry("int", "Integer"), Map.entry("java.lang.Integer", "Integer"), Map.entry("int[]", "Integer[]"),
+            Map.entry("java.lang.Integer[]", "Integer[]"),
+
+            Map.entry("long", "Long"), Map.entry("java.lang.Long", "Long"), Map.entry("long[]", "Long[]"),
+            Map.entry("java.lang.Long[]", "Long[]"),
+
+            // Floats
+            Map.entry("float", "Float"), Map.entry("java.lang.Float", "Float"), Map.entry("float[]", "Float[]"),
+            Map.entry("java.lang.Float[]", "Float[]"),
+
+            // Doubles
+            Map.entry("double", "Double"), Map.entry("java.lang.Double", "Double"), Map.entry("double[]", "Double[]"),
+            Map.entry("java.lang.Double[]", "Double[]"),
+
+            // Strings
+            Map.entry("java.lang.String", "String"), Map.entry("java.lang.String[]", "String[]"),
+
+            // Raw bytes
+            Map.entry("byte[]", "Byte[]")
+    );
+
+    /**
+     * Main processing method for dealing with all the annotations.
+     *
+     * @param annotations set all annotated classes.
+     * @param roundEnv    processing env for the processor.
+     * @return if the processor runs successfully.
+     */
+    @Override
+    public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
+        // Group annotated elements by their containing class
+        Map<TypeElement, List<VariableElement>> classToFields = new HashMap<>();
+        Set<TypeElement> annotatedClasses = new HashSet<>();
+
+        for (Element annotated : roundEnv.getElementsAnnotatedWith(NTParameter.class)) {
+            if (annotated.getKind() == ElementKind.CLASS) {
+                // Class-level annotation
+                TypeElement rootClass = (TypeElement) annotated;
+                annotatedClasses.add(rootClass);
+                validateFields(rootClass);
+                generateWrapper(rootClass);
+            } else if (annotated.getKind() == ElementKind.FIELD) {
+                // Field-level annotation
+                VariableElement field = (VariableElement) annotated;
+                TypeElement containingClass = (TypeElement) field.getEnclosingElement();
+
+                // Validate the field
+                if (!validateSingleField(field)) {
+                    continue;
+                }
+
+
+                // Group fields by their containing class
+                classToFields.computeIfAbsent(containingClass, k -> new ArrayList<>()).add(field);
+            } else {
+                processingEnv.getMessager().printMessage(
+                        Diagnostic.Kind.ERROR, "@lib.ntext.NTParameter can only be applied to classes or fields.",
+                        annotated
+                );
+            }
+        }
+
+        // Process field-level annotations grouped by class
+        for (Map.Entry<TypeElement, List<VariableElement>> entry : classToFields.entrySet()) {
+            TypeElement containingClass = entry.getKey();
+            List<VariableElement> fields = entry.getValue();
+
+            // Skip if this class was already processed as a class-level annotation
+            if (annotatedClasses.contains(containingClass)) {
+                continue;
+            }
+
+            // Generate field wrappers
+            generateFieldWrapper(containingClass, fields);
+        }
+
+        return true;
+    }
+
+    /**
+     * Validate a single field for field-level annotations.
+     */
+    private boolean validateSingleField(VariableElement field) {
+        String className = field.getEnclosingElement().getSimpleName().toString();
+
+        if (!field.getModifiers().contains(Modifier.STATIC)) {
+            processingEnv.getMessager().printMessage(
+                    Diagnostic.Kind.ERROR,
+                    "Field '" + field.getSimpleName() + "' in class '" + className + "' must be declared static.",
+                    field
+            );
+            return false;
+        }
+
+        String typeName = field.asType().toString();
+        if (!NT_TYPES_TABLE.containsKey(typeName)) {
+            processingEnv.getMessager().printMessage(
+                    Diagnostic.Kind.ERROR,
+                    "Invalid field type '" + typeName + "' in class '" + className + "'.",
+                    field
+            );
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Recursive method to check all the fields of a class.
+     *
+     * @param classElement root class.
+     */
+    private void validateFields(TypeElement classElement) {
+        String className = classElement.getQualifiedName().toString();
+        List<VariableElement> fields = ElementFilter.fieldsIn(classElement.getEnclosedElements());
+        for (VariableElement field : fields) {
+            if (!field.getModifiers().contains(Modifier.STATIC)) {
+                processingEnv.getMessager().printMessage(
+                        Diagnostic.Kind.ERROR,
+                        "Field '" + field.getSimpleName() + "' in class '" + className + "' must be declared static.",
+                        field
+                );
+                continue;
+            }
+
+            String typeName = field.asType().toString();
+            if (!NT_TYPES_TABLE.containsKey(typeName)) {
+                processingEnv.getMessager().printMessage(
+                        Diagnostic.Kind.ERROR, "Invalid field type '" + typeName + "' in class '" + className + "'.",
+                        field
+                );
+                throw new FieldTypeError("Invalid field type '" + typeName + "' in class '" + className + "'.");
+            }
+        }
+
+        for (Element enclosed : classElement.getEnclosedElements()) {
+            if (enclosed.getKind() == ElementKind.CLASS && enclosed.getModifiers().contains(Modifier.STATIC)) {
+                validateFields((TypeElement) enclosed);
+            } else if (enclosed.getKind() == ElementKind.CLASS) {
+                processingEnv.getMessager().printMessage(
+                        Diagnostic.Kind.ERROR,
+                        "Nested class '" + enclosed.getSimpleName() + "' in '" + className + "' must be declared static.",
+                        enclosed
+                );
+                throw new FieldTypeError("Nested class '" + enclosed.getSimpleName() + "' in '" + className + "'.");
+            }
+        }
+    }
+
+    /**
+     * Generate wrapper for field-level annotations.
+     */
+    /**
+     * Generate wrapper for field-level annotations.
+     */
+    private void generateFieldWrapper(TypeElement containingClass, List<VariableElement> annotatedFields) {
+        // Use the first field's annotation for table name, or derive from class name
+        String tableName = null;
+        for (VariableElement field : annotatedFields) {
+            NTParameter annotation = field.getAnnotation(NTParameter.class);
+            if (annotation != null && !annotation.tableName().isEmpty()) {
+                tableName = annotation.tableName();
+                break;
+            }
+        }
+
+        if (tableName == null) tableName = containingClass.getSimpleName().toString();
+
+        String pkgName = processingEnv.getElementUtils().getPackageOf(containingClass).toString();
+        String className = containingClass.getSimpleName() + "NT";
+
+        // start builder, write header
+        StringBuilder builder = new StringBuilder();
+        builder.append("package ").append(pkgName).append(";\n\n")
+                .append("import edu.wpi.first.networktables.NetworkTableEntry;\n")
+                .append("import edu.wpi.first.networktables.NetworkTableInstance;\n\n")
+                .append("import lib.ntext.NTParameterWrapper;\n\n")
+                .append("public class ").append(className).append(" {\n");
+
+        // Track field names for isAnyChanged()
+        List<String> fieldNames = new ArrayList<>();
+
+        // Process only the annotated fields
+        for (VariableElement field : annotatedFields) {
+            String fieldName = field.getSimpleName().toString();
+            String typeName = NT_TYPES_TABLE.get(field.asType().toString());
+            Object defaultValue = field.getConstantValue();
+            String defaultLiteral = getDefaultLiteral(defaultValue, typeName);
+
+            builder.append("  public static final NTParameterWrapper<")
+                    .append(typeName).append("> ").append(fieldName)
+                    .append(" = new NTParameterWrapper<>(")
+                    .append("\"").append(tableName).append("/").append(fieldName).append("\", ")
+                    .append(defaultLiteral).append(");\n");
+
+            fieldNames.add(fieldName);
+        }
+
+        // Append isAnyChanged() if any fields exist
+        if (!fieldNames.isEmpty()) {
+            builder.append("\n  public static boolean isAnyChanged() {\n")
+                    .append("    return ")
+                    .append(String.join(" || ", fieldNames.stream().map(f -> f + ".hasChanged()").toList()))
+                    .append(";\n  }\n");
+        }
+
+        // end, write as a generated java file
+        builder.append("}\n");
+
+        try {
+            JavaFileObject file = processingEnv.getFiler().createSourceFile(pkgName + "." + className, containingClass);
+            try (Writer writer = file.openWriter()) {
+                writer.write(builder.toString());
+            }
+        } catch (IOException e) {
+            processingEnv.getMessager().printMessage(
+                    Diagnostic.Kind.ERROR, "Codegen failed: " + e.getMessage(), containingClass);
+        }
+    }
+
+
+    /**
+     * Entry method for generating corresponding network table method for the class.
+     *
+     * @param rootClass root class.
+     */
+    private void generateWrapper(TypeElement rootClass) {
+        String tableName = rootClass.getAnnotation(NTParameter.class).tableName();
+        String pkgName = processingEnv.getElementUtils().getPackageOf(rootClass).toString();
+        String className = rootClass.getSimpleName() + "NT";
+
+        // start builder, write header
+        StringBuilder builder = new StringBuilder();
+        builder.append("package ").append(pkgName).append(";\n\n").append(
+                "import edu.wpi.first.networktables.NetworkTableEntry;\n").append(
+                "import edu.wpi.first.networktables.NetworkTableInstance;\n\n").append(
+                "import lib.ntext.NTParameterWrapper;\n\n").append("public class ").append(className).append(" {\n");
+
+        // do recursive adding
+        buildClassContent(rootClass, tableName, builder, "  ", "");
+
+        // end, write as a generated java file
+        builder.append("}\n");
+        try {
+            JavaFileObject file = processingEnv.getFiler().createSourceFile(pkgName + "." + className, rootClass);
+            try (Writer writer = file.openWriter()) {
+                writer.write(builder.toString());
+            }
+        } catch (IOException e) {
+            processingEnv.getMessager().printMessage(
+                    Diagnostic.Kind.ERROR, "Codegen failed: " + e.getMessage(), rootClass);
+        }
+    }
+
+    /**
+     * Get default literal value for a field.
+     */
+    private String getDefaultLiteral(Object defaultValue, String typeName) {
+        if (defaultValue != null) {
+            if (defaultValue instanceof String s) {
+                return "\"" + s.replace("\"", "\\\"") + "\"";
+            } else if (defaultValue instanceof Character c) {
+                return "'" + c + "'";
+            } else if (defaultValue instanceof Long) {
+                return defaultValue + "L";
+            } else if (defaultValue instanceof Float) {
+                return defaultValue + "f";
+            } else if (defaultValue instanceof Double) {
+                return defaultValue + "d";
+            } else {
+                return defaultValue.toString();
+            }
+        }
+
+        // Fallbacks by type
+        switch (typeName) {
+            case "java.lang.String":
+                return "";
+            case "boolean":
+            case "java.lang.Boolean":
+                return "false";
+            case "int":
+            case "java.lang.Integer":
+            case "long":
+            case "java.lang.Long":
+                return "0";
+            case "float":
+            case "java.lang.Float":
+                return "0.0f";
+            case "double":
+            case "java.lang.Double":
+                return "0.0";
+            case "byte[]":
+                return "new byte[0]";
+            default:
+                if (typeName.endsWith("[]")) {
+                    return "new " + typeName.replace("[]", "") + "[0]";
+                } else {
+                    return "null";
+                }
+        }
+    }
+
+    /**
+     * Recursive method for generating NTParameterWrapper fields and isAnyChanged() methods.
+     *
+     * @param classElement current class
+     * @param tablePath    base NetworkTable path
+     * @param builder      output builder
+     * @param indent       indentation for current scope
+     * @param prefix       NetworkTable key prefix for nested fields (e.g., "Outer/Inner/")
+     */
+    private void buildClassContent(TypeElement classElement, String tablePath, StringBuilder builder,
+                                   String indent, String prefix) {
+        List<VariableElement> fields = ElementFilter.fieldsIn(classElement.getEnclosedElements());
+        List<String> fieldNames = new ArrayList<>();
+
+        for (VariableElement field : fields) {
+            String fieldName = field.getSimpleName().toString();
+            String typeName = NT_TYPES_TABLE.get(field.asType().toString());
+            Object defaultValue = field.getConstantValue();
+            String defaultLiteral = getDefaultLiteral(defaultValue, typeName);
+            String fullKey = tablePath + "/" + prefix + fieldName;
+
+            builder.append(indent).append("public static final NTParameterWrapper<").append(typeName).append("> ")
+                    .append(fieldName).append(" = new NTParameterWrapper<>(")
+                    .append("\"").append(fullKey).append("\", ").append(defaultLiteral).append(");\n");
+
+            fieldNames.add(fieldName);
+        }
+
+        if (!fieldNames.isEmpty()) {
+            builder.append("\n").append(indent).append("public static boolean isAnyChanged() {\n")
+                    .append(indent).append("  return ")
+                    .append(String.join(" || ", fieldNames.stream().map(f -> f + ".hasChanged()").toList()))
+                    .append(";\n").append(indent).append("}\n\n");
+        }
+
+        for (Element enclosed : classElement.getEnclosedElements()) {
+            if (enclosed.getKind() == ElementKind.CLASS && enclosed instanceof TypeElement nested) {
+                String nestedName = nested.getSimpleName().toString();
+                builder.append(indent).append("public static class ").append(nestedName).append(" {\n");
+                buildClassContent(nested, tablePath, builder, indent + "  ", prefix + nestedName + "/");
+                builder.append(indent).append("}\n");
+            }
+        }
+    }
+
+    /**
+     * Build content for specific fields (used for field-level annotations).
+     */
+    private void buildFieldsContent(
+            List<VariableElement> fields, String tableName, StringBuilder builder, String indent) {
+        for (VariableElement field : fields) {
+            String fieldName = field.getSimpleName().toString();
+            String typeName = NT_TYPES_TABLE.get(field.asType().toString());
+            Object defaultValue = field.getConstantValue();
+            String defaultLiteral = getDefaultLiteral(defaultValue, typeName);
+
+            builder.append(indent).append("public static final NTParameterWrapper<").append(typeName).append(
+                    "> ").append(fieldName).append(" = new NTParameterWrapper<>(").append("\"").append(
+                    tableName).append("/").append(fieldName).append("\", ").append(defaultLiteral).append(");\n");
+
+        }
+    }
+
+    public static class FieldTypeError extends Error {
+        public FieldTypeError(String message) {
+            super(message);
+        }
+    }
+}
+
+==== NTParameterRegistry.java ====
+package lib.ntext;
+
+import edu.wpi.first.math.Pair;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
+
+public class NTParameterRegistry {
+    private static final List<NTParameterWrapper<?>> wrappers = new ArrayList<>();
+    private static final List<Pair<NTParameterWrapper<?>, Consumer<Object>>> onchangeSiConsumers = new ArrayList<>();
+    private static final List<Pair<NTParameterWrapper<?>, BiConsumer<Object, Object>>> onchangeBiConsumers = new ArrayList<>();
+
+    protected static void registerWrapper(NTParameterWrapper<?> wrapper) {
+        wrappers.add(wrapper);
+    }
+
+    @SuppressWarnings("unchecked")
+    protected static void registerOnChange(NTParameterWrapper<?> wrapper, BiConsumer<?, ?> functor) {
+        BiConsumer<Object, Object> castedFunctor = (BiConsumer<Object, Object>) functor;
+        onchangeBiConsumers.add(Pair.of(wrapper, castedFunctor));
+    }
+
+    @SuppressWarnings("unchecked")
+    protected static void registerOnChange(NTParameterWrapper<?> wrapper, Consumer<?> functor) {
+        Consumer<Object> castedFunctor = (Consumer<Object>) functor;
+        onchangeSiConsumers.add(Pair.of(wrapper, castedFunctor));
+    }
+
+    public static void refresh() {
+        onchangeSiConsumers.forEach(pair -> {
+            if (pair.getFirst().hasChanged())
+                pair.getSecond().accept(pair.getFirst().getValue());
+        });
+        onchangeBiConsumers.forEach(pair -> {
+            if (pair.getFirst().hasChanged())
+                pair.getSecond().accept(pair.getFirst().getValue(), pair.getFirst().getPreviousValue());
+        });
+        wrappers.forEach(NTParameterWrapper::refresh);
+    }
+}
+
+
+==== NTParameterWrapper.java ====
+package lib.ntext;
+
+import edu.wpi.first.networktables.NetworkTableEntry;
+import edu.wpi.first.networktables.NetworkTableInstance;
+
+import java.util.Objects;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
+
+public class NTParameterWrapper<T> {
+    private final NetworkTableEntry entry;
+    protected T value;
+    protected T prevValue;
+
+    public NTParameterWrapper(String tableName, T defaultValue) {
+        entry = NetworkTableInstance.getDefault().getEntry(tableName);
+        entry.setDefaultValue(defaultValue);
+        value = defaultValue;
+        prevValue = null; // NOTE: design choice to make change happen on default
+
+        NTParameterRegistry.registerWrapper(this);
+    }
+
+    public T getValue() {
+        return value; // must be correct, check at annotation processor
+    }
+
+    public T getPreviousValue() {
+        return prevValue;
+    }
+
+    public boolean hasChanged() {
+        return !Objects.equals(prevValue, value);
+    }
+
+    public void onChange(Consumer<T> current) {
+        NTParameterRegistry.registerOnChange(this, current);
+    }
+
+    public void onChange(BiConsumer<T, T> currentPrevious) {
+        NTParameterRegistry.registerOnChange(this, currentPrevious);
+    }
+
+    @SuppressWarnings("unchecked")
+    public void refresh() {
+        prevValue = value;
+        value = (T) entry.getValue().getValue();
+    }
+}
+
+
+
+
+==== robot\Main.java ====
+// Copyright (c) FIRST and other WPILib contributors.
+// do not touch this file, we havn't arrived yet
+// Open Source Software; you can modify and/or share it under the terms of
+// the WPILib BSD license file in the root directory of this project.
+
+package frc.robot;
+
+import edu.wpi.first.wpilibj.RobotBase;
+
+/**
+ * Do NOT add any static variables to this class, or any initialization at all. Unless you know what
+ * you are doing, do not modify this file except to change the parameter class to the startRobot call.
+ */
+public final class Main
+{
+    private Main() {}
+
+   /**
+    * Main initialization method. Do not perform any initialization here.
+    * <p>
+    * If you change your main Robot class (name), change the parameter type.
+    */
+    public static void main(String... args)
+    {
+        RobotBase.startRobot(Robot::new);
+    }
+}
+
+
+==== robot\Robot.java ====
+package frc.robot;
+
+import org.littletonrobotics.junction.LoggedRobot;
+import org.littletonrobotics.junction.Logger;
+import org.littletonrobotics.junction.networktables.NT4Publisher;
+import org.littletonrobotics.junction.wpilog.WPILOGWriter;
+
+import edu.wpi.first.wpilibj.TimedRobot;
+import edu.wpi.first.wpilibj2.command.Command;
+import edu.wpi.first.wpilibj2.command.CommandScheduler;
+
+public class Robot extends LoggedRobot {
+  private Command m_autonomousCommand;
+  private RobotContainer m_robotContainer;
+
+  @Override
+  public void robotInit() {
+    m_robotContainer = new RobotContainer();
+    Logger.addDataReceiver(new WPILOGWriter());        // log to file
+    Logger.addDataReceiver(new NT4Publisher());   
+    Logger.recordMetadata("GitSHA", BuildConstants.GIT_SHA);
+    Logger.start();
+  }
+
+  @Override
+  public void robotPeriodic() {
+    CommandScheduler.getInstance().run();
+  }
+
+  @Override
+  public void disabledInit() {}
+
+  @Override
+  public void disabledPeriodic() {}
+
+  @Override
+  public void autonomousInit() {
+    m_autonomousCommand = m_robotContainer.getAutonomousCommand();
+    if (m_autonomousCommand != null) m_autonomousCommand.schedule();
+  }
+
+  @Override
+  public void autonomousPeriodic() {}
+
+  @Override
+  public void teleopInit() {
+    if (m_autonomousCommand != null) m_autonomousCommand.cancel();
+  }
+
+  @Override
+  public void teleopPeriodic() {}
+
+  @Override
+  public void testInit() {
+    CommandScheduler.getInstance().cancelAll();
+  }
+
+  @Override
+  public void testPeriodic() {}
+
+  @Override
+  public void simulationInit() {}
+
+  @Override
+  public void simulationPeriodic() {}
+}
+
+==== robot\RobotContainer.java ====
+package frc.robot;
+
+import edu.wpi.first.math.Pair;
+import edu.wpi.first.math.controller.PIDController;
+import edu.wpi.first.math.geometry.Pose3d;
+import edu.wpi.first.math.kinematics.ChassisSpeeds;
+import edu.wpi.first.math.system.plant.DCMotor;
+import edu.wpi.first.wpilibj.GenericHID;
+import edu.wpi.first.wpilibj.Timer;
+import edu.wpi.first.wpilibj.XboxController;
+import edu.wpi.first.wpilibj2.command.Command;
+import edu.wpi.first.wpilibj2.command.Commands;
+import edu.wpi.first.wpilibj2.command.RunCommand;
+import edu.wpi.first.wpilibj2.command.button.CommandXboxController;
+import frc.robot.TankDrive.TankCommands;
+import frc.robot.TankDrive.TankConfigs;
+import frc.robot.TankDrive.TankLimits;
+import frc.robot.TankDrive.TankSubsystem;
+import frc.robot.TankDrive.Side.Side;
+import frc.robot.TankDrive.Side.SideIO;
+import frc.robot.TankDrive.Side.SideIOReal;
+import frc.robot.TankDrive.Side.SideIOSim;
+import frc.robot.TankDrive.Imu.ImuIOPigeon2;
+import frc.robot.TankDrive.Imu.ImuIOSim;
+import frc.robot.TankDrive.TankConfigs.SideConfigsSim;
+import frc.robot.TankDrive.TankSubsystem.TankDrivingStates;
+
+import java.util.ArrayList;
+import java.util.Optional;
+
+import static edu.wpi.first.units.Units.*;
+
+/** Robot container that works in simulation without hardware. */
+public class RobotContainer {
+    /* ---------- Joysticks ---------- */
+    private final CommandXboxController controller = new CommandXboxController(0);
+    private TankSubsystem tankSubsystem;
+    private Side left;
+    private Side right;
+
+    private void configureSubsystems() {
+        if(Robot.isReal()){
+            tankSubsystem = new TankSubsystem(TankConstants.tankConfigsReal,
+             TankDrivingStates.PURE_DRIVE,
+             new  Pair<>(new SideIOReal(
+                TankConstants.leftReal, "Left"),
+                 new SideIOReal(TankConstants.rightReal, "Right")),
+                 new ImuIOPigeon2(TankConstants.leftReal) );
+        }else{
+            tankSubsystem = new TankSubsystem(TankConstants.tankConfigsSim,
+             TankDrivingStates.PURE_DRIVE,
+             new  Pair<>(new SideIOSim(
+                TankConstants.leftSim, "Left"),
+                 new SideIOSim(TankConstants.rightSim, "Right")),
+                 new ImuIOSim() );
+        }
+    }
+
+    public RobotContainer() {
+        configureSubsystems();
+        configureBindings();
+    }
+
+    private void configureBindings() {
+        tankSubsystem.setDefaultCommand(
+                TankCommands.driveWithJoystick(
+                        tankSubsystem,
+                        /* forward/back */ () -> -controller.getLeftY(),   // -1..1
+                        /* turn         */ () ->  controller.getRightX(), // -1..1
+                        tankSubsystem.getTankLimit().maxLinearVelocity(),  // max speed
+                        RadiansPerSecond.of(4.0),                            // max turn
+                        MetersPerSecond.of(0.01),                          // deadband
+                        RadiansPerSecond.of(0.01))
+        );
+
+        /* "A" button stops the robot */
+        controller.a().whileTrue(TankCommands.stop(tankSubsystem));
+    }
+
+    /* ---------- Auto placeholder ---------- */
+    public Command getAutonomousCommand() {
+        return Commands.none();
+    }
+}
+
+==== robot\TankConstants.java ====
+package frc.robot;
+import static edu.wpi.first.units.Units.Amps;
+import static edu.wpi.first.units.Units.Hertz;
+import static edu.wpi.first.units.Units.Inches;
+import static edu.wpi.first.units.Units.KilogramSquareMeters;
+import static edu.wpi.first.units.Units.MetersPerSecond;
+import static edu.wpi.first.units.Units.MetersPerSecondPerSecond;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import com.ctre.phoenix6.hardware.TalonFX;
+
+import edu.wpi.first.math.Pair;
+import edu.wpi.first.math.system.plant.DCMotor;
+import frc.robot.TankDrive.TankConfigs;
+import frc.robot.TankDrive.TankLimits;
+import frc.robot.TankDrive.TankConfigs.SideConfigs;
+import frc.robot.TankDrive.TankConfigs.SideConfigsReal;
+import frc.robot.TankDrive.TankConfigs.SideConfigsSim;
+// do not touch this file, we havn't arrived yet
+import lib.ntext.NTParameter;
+
+public class TankConstants {
+    @NTParameter(tableName = "Params/Tank")
+    public static final class TankParams {
+        public static final double kP = 0.225;
+        public static final double kI = 0.0;
+        public static final double kD = 0.0;
+        public static final double kA = 0.0;
+        public static final double kV = 0.01;
+        public static final double kS = 0.0;
+    }
+    public static final SideConfigsReal leftReal = SideConfigsReal.builder()
+        .name("Left")
+        .deltaTimeInSeconds(0.02)
+        .gearRatio(10.71)
+        .canivoreCanBusName("6941Canivore0")
+        .driveStatorCurrentLimit(Amps.of(40))
+        .wheelDiameter(Inches.of(6))
+        .motorInverted(new ArrayList<>(java.util.List.of(true, false)))
+        .motors(new ArrayList<>(java.util.List.of(
+                new TalonFX(1, "6941Canivore0"),
+                new TalonFX(2, "6941Canivore0"))))
+        .motorId(new ArrayList<>(java.util.List.of(1, 2)))         // <-- add if you need a gyro on this side
+        .odometryFrequency(Hertz.of(100))
+        .pigeonId(10)   
+        .build();
+    public static final SideConfigsReal rightReal = SideConfigsReal.builder()
+        .name("Right")
+        .deltaTimeInSeconds(0.02)
+        .gearRatio(10.71)
+        .canivoreCanBusName("6941Canivore0")
+        .driveStatorCurrentLimit(Amps.of(40))
+        .wheelDiameter(Inches.of(6))
+        .motorInverted(new ArrayList<>(java.util.List.of(false, true)))
+        .motors(new ArrayList<>(java.util.List.of(
+                new TalonFX(3, "6941Canivore0"),
+                new TalonFX(4, "6941Canivore0"))))
+        .motorId(new ArrayList<>(java.util.List.of(3, 4)))
+        .pigeonId(10)           // <-- add if you need a gyro on this side
+        .odometryFrequency(Hertz.of(100))
+        .build();
+    public static final TankConfigs tankConfigsReal = TankConfigs.builder()
+        .name("m_tank")
+        .sides(new Pair<TankConfigs.SideConfigs,TankConfigs.SideConfigs>(rightReal, leftReal))
+        .trackWidth(0.548)
+        .tankLimits(new TankLimits(MetersPerSecond.of(3.5),MetersPerSecondPerSecond.of(2)))
+        .build();
+    public static final SideConfigsSim leftSim = SideConfigsSim.builder()
+        .name("Left")
+        .deltaTimeInSeconds(0.02)
+        .gearRatio(10.71)
+        .momentOfInertia(new ArrayList<>(List.of(KilogramSquareMeters.of(0.04), KilogramSquareMeters.of(0.04))))
+        .motors(new ArrayList<>(List.of(
+            DCMotor.getKrakenX60(1),
+            DCMotor.getKrakenX60(1)
+        )))
+        .motorInverted(new ArrayList<>(List.of(true, false)))
+        .driveStdDevPos(0.002)
+        .driveStdDevVel(0.002)
+        .wheelDiameter(Inches.of(6))
+        .distanceRelativeToCenter(Inches.of(21.589/2))
+        .build();
+    public static final SideConfigsSim rightSim = SideConfigsSim.builder()
+        .name("Right")
+        .deltaTimeInSeconds(0.02)
+        .gearRatio(10.71)
+        .momentOfInertia(new ArrayList<>(List.of(KilogramSquareMeters.of(0.04), KilogramSquareMeters.of(0.04))))
+        .motors(new ArrayList<>(List.of(
+            DCMotor.getKrakenX60(1),
+            DCMotor.getKrakenX60(1)
+        )))
+        .motorInverted(new ArrayList<>(List.of(false, true)))
+        .driveStdDevPos(0.002)
+        .driveStdDevVel(0.002)
+        .wheelDiameter(Inches.of(6))
+        .distanceRelativeToCenter(Inches.of(21.589/2))
+        .build();
+    public static final TankConfigs tankConfigsSim = TankConfigs.builder()
+        .name("m_tank")
+        .sides(new Pair<TankConfigs.SideConfigs,TankConfigs.SideConfigs>(rightSim, leftSim))
+        .trackWidth(0.548)
+        .tankLimits(new TankLimits(MetersPerSecond.of(4.5),MetersPerSecondPerSecond.of(2)))
+        .build();
+}
+
+
+==== robot\TankDrive\TankCommands.java ====
+package frc.robot.TankDrive;
+
+import edu.wpi.first.math.MathUtil;
+import edu.wpi.first.math.controller.PIDController;
+import edu.wpi.first.math.geometry.*;
+import edu.wpi.first.math.kinematics.ChassisSpeeds;
+import edu.wpi.first.math.kinematics.DifferentialDriveWheelSpeeds;
+import edu.wpi.first.units.measure.*;
+import edu.wpi.first.wpilibj2.command.Command;
+import edu.wpi.first.wpilibj2.command.Commands;
+import edu.wpi.first.wpilibj2.command.sysid.SysIdRoutine;
+import frc.robot.TankDrive.Commands.TankDriveToPoseCommand;
+import frc.robot.TankDrive.Commands.TankFollowPathPlannerCommand;
+import frc.robot.TankDrive.Commands.TankFollowTrajectoryCommand;
+
+import java.util.function.*;
+import java.util.logging.Logger;
+
+import com.pathplanner.lib.events.Event;
+import com.pathplanner.lib.path.PathPlannerPath;
+import com.pathplanner.lib.trajectory.PathPlannerTrajectory;
+
+import edu.wpi.first.math.trajectory.Trajectory;
+
+import static edu.wpi.first.units.Units.*;
+
+/**
+ * High-level command factory for the tank drive.
+ */
+public class TankCommands {
+
+    /* ---------- Joystick curve helpers (mirrors swerve) ---------- */
+    public static final DoubleUnaryOperator LINEAR  = x -> x;
+    public static final DoubleUnaryOperator QUADRATIC = x -> x * x * Math.signum(x);
+    public static final DoubleUnaryOperator CUBIC     = x -> x * x * x;
+
+    /* ---------- 1. Drive with joystick (raw) ---------- */
+    public static Command driveWithJoystick(
+            TankSubsystem tank,
+            DoubleSupplier linearSpeedSupplier,   // usually left Y
+            DoubleSupplier angularSpeedSupplier,  // usually right X
+            LinearVelocity maxLinear,
+            AngularVelocity maxAngular,
+            LinearVelocity linearDeadband,
+            AngularVelocity angularDeadband,
+            DoubleUnaryOperator linearCurve,
+            DoubleUnaryOperator angularCurve
+    ) {
+        return Commands.run(() -> {
+            
+            // apply curves + deadband
+            double lin = MathUtil.applyDeadband(
+                    linearCurve.applyAsDouble(linearSpeedSupplier.getAsDouble()),
+                    linearDeadband.in(MetersPerSecond)
+            ) * maxLinear.in(MetersPerSecond);
+
+            double ang = MathUtil.applyDeadband(
+                    angularCurve.applyAsDouble(angularSpeedSupplier.getAsDouble()),
+                    angularDeadband.in(RadiansPerSecond)
+            ) * maxAngular.in(RadiansPerSecond);
+            System.out.printf("lin=%.2f  ang=%.2f%n", lin, ang);
+            System.out.println(linearSpeedSupplier.getAsDouble() +" "+ angularSpeedSupplier.getAsDouble());
+            // convert to wheel speeds
+            ChassisSpeeds speeds = new ChassisSpeeds(lin, 0, ang);
+            DifferentialDriveWheelSpeeds wheelSpeeds =
+                    tank.getKinematics().toWheelSpeeds(speeds);
+            System.out.println(wheelSpeeds.leftMetersPerSecond + " " + wheelSpeeds.rightMetersPerSecond);
+
+            tank.runVelocity(wheelSpeeds);
+        }, tank);
+    }
+
+    /* ---------- 2. Convenience overload with default curves ---------- */
+    public static Command driveWithJoystick(
+            TankSubsystem tank,
+            DoubleSupplier linearSpeedSupplier,
+            DoubleSupplier angularSpeedSupplier,
+            LinearVelocity maxLinear,
+            AngularVelocity maxAngular,
+            LinearVelocity linearDeadband,
+            AngularVelocity angularDeadband
+    ) {
+        return driveWithJoystick(
+                tank, linearSpeedSupplier, angularSpeedSupplier,
+                maxLinear, maxAngular, linearDeadband, angularDeadband,
+                QUADRATIC, QUADRATIC
+        );
+    }
+
+    /* ---------- 3. Drive to pose ---------- */
+    public static Command driveToPose(
+            TankSubsystem tank,
+            Supplier<Pose3d> robotPoseSupplier,
+            Supplier<Pose3d> targetPoseSupplier,
+            PIDController linController,
+            PIDController rotController,
+            Distance translationTolerance,
+            Angle rotationTolerance
+    ) {
+        return new TankDriveToPoseCommand(
+                tank, robotPoseSupplier, targetPoseSupplier,
+                linController, rotController,
+                translationTolerance, rotationTolerance
+        );
+    }
+
+    /* ---------- 4. Stop ---------- */
+    public static Command stop(TankSubsystem tank) {
+        return Commands.runOnce(tank::runStop, tank);
+    }
+
+    /* ---------- 5. Reset pose ---------- */
+    public static Command resetPose(TankSubsystem tank, Pose3d pose) {
+        return Commands.runOnce(() -> tank.resetEstimatedPose(pose), tank);
+    }
+
+    /* ---------- 6. Follow a WPILib Trajectory ---------- */
+    public static Command followTrajectory(
+        TankSubsystem tank,
+        Trajectory trajectory,
+        Supplier<Pose3d> robotPoseSupplier,
+        PIDController leftController,
+        PIDController rightController,
+        Distance tolerance) {
+
+    return new TankFollowTrajectoryCommand(
+            tank, trajectory, robotPoseSupplier,
+            leftController, rightController, tolerance);
+    }
+
+    /* ---------- 7. Follow a PathPlanner trajectory ---------- */
+    public static Command followPathPlannerPath(
+        TankSubsystem tank,
+        PathPlannerTrajectory trajectory,
+        Supplier<Pose3d> robotPoseSupplier,
+        PIDController leftController,
+        PIDController rightController,
+        Distance tolerance,
+        Consumer<Event> eventConsumer) {
+
+    return new TankFollowPathPlannerCommand(
+            tank, trajectory, robotPoseSupplier,
+            leftController, rightController, tolerance, eventConsumer);
+    }
+
+    /* ---------- 8. SysId ---------- */
+    public static SysIdRoutine sysId(
+            TankSubsystem tank,
+            Velocity<edu.wpi.first.units.VoltageUnit> ramp,
+            edu.wpi.first.units.measure.Voltage step,
+            Time timeout
+    ) {
+        return new SysIdRoutine(
+                new SysIdRoutine.Config(
+                        ramp, step, timeout,
+                        state -> {
+                            // Logging callback
+                        }
+                ),
+                new SysIdRoutine.Mechanism(
+                        tank::runVoltage,
+                        null,   // no log consumer, we do it above
+                        tank
+                )
+        );
+    }
+
+    /* ---------- Helper functional interface ---------- */
+    @FunctionalInterface
+    public static interface DoubleUnaryOperator {
+        double applyAsDouble(double operand);
+    }
+}
+
+==== robot\TankDrive\TankConfigs.java ====
+package frc.robot.TankDrive;
+//Finished, if anychange needed, please contact, rather than just editing the file.
+import java.util.ArrayList;
+
+import com.ctre.phoenix6.hardware.TalonFX;
+
+import edu.wpi.first.math.Pair;
+import edu.wpi.first.math.system.plant.DCMotor;
+import edu.wpi.first.units.measure.Current;
+import edu.wpi.first.units.measure.Distance;
+import edu.wpi.first.units.measure.Frequency;
+import edu.wpi.first.units.measure.MomentOfInertia;
+import lombok.Builder;
+import lombok.Getter;
+import lombok.experimental.SuperBuilder;
+
+@Getter
+@SuperBuilder
+public class TankConfigs {
+    public final String name;
+
+    public TankLimits tankLimits;
+
+
+    public final double trackWidth;
+
+    public Pair<SideConfigs, SideConfigs> sides;
+
+    public interface SideConfigs {
+        String getName();
+        int motorNumber();
+    }
+
+    @Getter
+    @Builder
+    public static class SideConfigsReal implements SideConfigs {
+        public String name;
+        public final double deltaTimeInSeconds;
+        public double gearRatio;
+        public final int pigeonId;
+        public Frequency odometryFrequency;
+        public String canivoreCanBusName;
+
+        public ArrayList<TalonFX> motors;
+        public ArrayList<Integer> motorId;
+        public ArrayList<Boolean> motorInverted;
+        public Current driveStatorCurrentLimit;
+        public final Distance wheelDiameter;
+
+        @Override
+        public int motorNumber() {
+            return motors.size();
+        }
+    }
+
+
+
+    @Getter
+    @Builder
+    public static class SideConfigsSim implements SideConfigs {
+        public String name;
+        public final double deltaTimeInSeconds;
+        public double gearRatio;
+        public final Distance wheelDiameter;
+
+        public Distance distanceRelativeToCenter;
+        public ArrayList<DCMotor> motors;
+        public ArrayList<MomentOfInertia> momentOfInertia;
+        public ArrayList<Boolean> motorInverted;
+        public double driveStdDevPos;
+        public double driveStdDevVel;
+
+        @Override
+        public int motorNumber() {
+            return motors.size();
+        }
+    }
+
+}
+
+
+==== robot\TankDrive\TankLimits.java ====
+package frc.robot.TankDrive;
+//Finished, if anychange needed, please contact, rather than just editing the file.
+import static edu.wpi.first.units.Units.MetersPerSecondPerSecond;
+
+import edu.wpi.first.math.Pair;
+import edu.wpi.first.math.kinematics.DifferentialDriveWheelSpeeds;
+import edu.wpi.first.units.measure.LinearAcceleration;
+import edu.wpi.first.units.measure.LinearVelocity;
+import lombok.Builder;
+
+@Builder
+public record TankLimits(LinearVelocity maxLinearVelocity, LinearAcceleration maxLinearAcceleration){
+    public Pair<DifferentialDriveWheelSpeeds, Pair<LinearAcceleration, LinearAcceleration>> apply(DifferentialDriveWheelSpeeds currentSpeed,
+                                              DifferentialDriveWheelSpeeds desiredSpeed, double dt){
+        
+        double leftSpeedLimit = maxLinearVelocity.magnitude();
+        double rightSpeedLimit = maxLinearVelocity.magnitude();
+
+        double leftAccelerationLimit = maxLinearAcceleration.magnitude();
+        double rightAccelerationLimit = maxLinearAcceleration.magnitude();
+
+        double leftSpeed = currentSpeed.leftMetersPerSecond;
+        double rightSpeed = currentSpeed.rightMetersPerSecond;
+
+        double desiredleftSpeed = desiredSpeed.leftMetersPerSecond;
+        double desiredRightSpeed = desiredSpeed.rightMetersPerSecond;
+        
+        double limitedLeftSpeed =  Math.min(Math.max(leftSpeed, -leftSpeedLimit), leftSpeedLimit);
+        double limitedRightSpeed = Math.min(Math.max(rightSpeed, -rightSpeedLimit), rightSpeedLimit);
+
+        double leftAcceleration = (desiredleftSpeed - leftSpeed)/dt;
+        double rightAcceleration = (desiredRightSpeed - rightSpeed)/dt;
+
+        double limitedLeftAcceleration = Math.min(Math.max(leftAcceleration, -leftAccelerationLimit), leftAccelerationLimit);
+        double limitedRightAcceleration = Math.min(Math.max(rightAcceleration, -rightAccelerationLimit), rightAccelerationLimit);
+
+        DifferentialDriveWheelSpeeds limitedSpeeds = new DifferentialDriveWheelSpeeds(limitedLeftSpeed, limitedRightSpeed);
+        Pair<LinearAcceleration, LinearAcceleration> limitedAccelerations = new Pair<>(
+            LinearAcceleration.ofBaseUnits(limitedLeftAcceleration, MetersPerSecondPerSecond),
+            LinearAcceleration.ofBaseUnits(limitedRightAcceleration, MetersPerSecondPerSecond)
+        );
+
+        return Pair.of(limitedSpeeds, limitedAccelerations);
+    }
+
+
+}
+
+
+==== robot\TankDrive\TankPoseEstimator.java ====
+package frc.robot.TankDrive;
+
+import java.util.NavigableMap;
+import java.util.Optional;
+import java.util.TreeMap;
+
+import edu.wpi.first.math.Matrix;
+import edu.wpi.first.math.Nat;
+import edu.wpi.first.math.VecBuilder;
+import edu.wpi.first.math.numbers.N1;
+import edu.wpi.first.math.numbers.N4;
+import edu.wpi.first.math.numbers.N6;
+import edu.wpi.first.wpilibj.Timer;
+import edu.wpi.first.math.geometry.Pose2d;
+import edu.wpi.first.math.geometry.Pose3d;
+import edu.wpi.first.math.geometry.Rotation2d;
+import edu.wpi.first.math.geometry.Rotation3d;
+import edu.wpi.first.math.geometry.Twist3d;
+
+public class TankPoseEstimator {
+    private Pose3d poseMeters;
+    private final double trackWidthMeters;
+
+    // Buffer of past odometry poses for timestamp alignment
+    private final NavigableMap<Double, Pose3d> odometryPoseBuffer = new TreeMap<>();
+
+    // Kalman gain matrix for fusing vision and odometry (6x6 matrix: x,y,z,rx,ry,rz)
+    private final Matrix<N4, N1> m_q;  // Process noise matrix (from drivetrain)
+    private final edu.wpi.first.math.Matrix<edu.wpi.first.math.numbers.N6, N6> m_visionK;
+
+    private double prevLeftMeters = 0.0;
+    private double prevRightMeters = 0.0;
+
+    // Vision updates map: timestamp -> vision pose
+    private final NavigableMap<Double, Pose3d> m_visionUpdates = new TreeMap<>();
+
+    public TankPoseEstimator(
+        double trackWidthMeters,
+        Pose3d initialPose,
+        Matrix<N4, N1> processNoise) {
+
+        this.trackWidthMeters = trackWidthMeters;
+        this.poseMeters = initialPose;
+        this.m_q = processNoise;
+        this.m_visionK = Matrix.eye(Nat.N6());
+    }
+
+    /** Resets odometry and clears buffers. */
+    public void resetPose(Pose3d newPose, double leftMeters, double rightMeters) {
+        poseMeters = newPose;
+        prevLeftMeters = leftMeters;
+        prevRightMeters = rightMeters;
+        odometryPoseBuffer.clear();
+    }
+
+    /** Updates the pose using wheel distances. */
+    public Pose3d updatePose(double leftMeters, double rightMeters) {
+        double dLeft = leftMeters - prevLeftMeters;
+        double dRight = rightMeters - prevRightMeters;
+
+        prevLeftMeters = leftMeters;
+        prevRightMeters = rightMeters;
+
+        double dTheta = (dRight - dLeft) / trackWidthMeters;
+        double dS = (dRight + dLeft) / 2.0;
+
+        double heading = poseMeters.toPose2d().getRotation().getRadians();
+        double headingMid = heading + dTheta / 2.0;
+
+        double dx = dS * Math.cos(headingMid);
+        double dy = dS * Math.sin(headingMid);
+
+        poseMeters = new Pose3d(
+            poseMeters.getX() + dx,
+            poseMeters.getY() + dy,
+            0,
+            new Rotation3d(new Rotation2d(heading + dTheta))
+        );
+
+        // Save odometry sample into buffer with timestamp
+        double now = Timer.getFPGATimestamp();
+        odometryPoseBuffer.put(now, new Pose3d(
+            poseMeters.getX(), poseMeters.getY(), 0,
+            new Rotation3d(0, 0, poseMeters.toPose2d().getRotation().getRadians())
+        ));
+
+        return poseMeters;
+    }
+
+    /** Adds a vision measurement with default stdDevs. */
+    public void addVisionMeasurement(Pose3d visionRobotPoseMeters, double timestampSeconds) {
+        // Default: we trust vision at 50 cm and heading ±10 deg
+        Matrix<N4, N1> defaultStdDevs = VecBuilder.fill(0.5, 0.5, 0.5, Math.toRadians(10.0));
+        setVisionMeasurementStdDevs(defaultStdDevs);
+        fuseVisionMeasurement(visionRobotPoseMeters, timestampSeconds);
+    }
+
+    /**
+     * Returns the pose at a given timestamp, if the buffer is not empty.
+     *
+     * @param timestampSeconds The pose's timestamp in seconds.
+     * @return The pose at the given timestamp (or Optional.empty() if the buffer is empty).
+     */
+    public Optional<Pose3d> sampleAt(double timestampSeconds) {
+        if (odometryPoseBuffer.isEmpty()) {
+            return Optional.empty();
+        }
+
+        // Clamp the timestamp to the range of the odometry buffer
+        double oldest = odometryPoseBuffer.firstKey();
+        double newest = odometryPoseBuffer.lastKey();
+        timestampSeconds = Math.max(oldest, Math.min(timestampSeconds, newest));
+
+        // Get the odometry sample at the timestamp (interpolated if necessary)
+        Optional<Pose3d> odometrySample = getOdometrySample(timestampSeconds);
+        if (odometrySample.isEmpty()) return Optional.empty();
+
+        // If there are no vision updates before this timestamp, return odometry only
+        if (m_visionUpdates.isEmpty() || timestampSeconds < m_visionUpdates.firstKey()) {
+            return odometrySample;
+        }
+
+        // Get the latest vision update before or at the timestamp
+        Double floorTimestamp = m_visionUpdates.floorKey(timestampSeconds);
+        Pose3d visionPose = m_visionUpdates.get(floorTimestamp);
+
+        // Fuse vision with odometry
+        Twist3d twist = odometrySample.get().log(visionPose);
+
+        var k_times_twist = m_visionK.times(
+            VecBuilder.fill(twist.dx, twist.dy, twist.dz, twist.rx, twist.ry, twist.rz)
+        );
+
+        Twist3d scaledTwist = new Twist3d(
+            k_times_twist.get(0, 0),
+            k_times_twist.get(1, 0),
+            k_times_twist.get(2, 0),
+            k_times_twist.get(3, 0),
+            k_times_twist.get(4, 0),
+            k_times_twist.get(5, 0)
+        );
+
+        Pose3d correctedPose = odometrySample.get().exp(scaledTwist);
+        return Optional.of(correctedPose);
+    }
+
+
+    /** Adds a vision measurement with custom stdDevs. */
+    public void addVisionMeasurement(
+        Pose3d visionRobotPoseMeters,
+        double timestampSeconds,
+        Matrix<N4, N1> visionMeasurementStdDevs) {
+        setVisionMeasurementStdDevs(visionMeasurementStdDevs);
+        fuseVisionMeasurement(visionRobotPoseMeters, timestampSeconds);
+    }
+
+    /** Sets the Kalman gain matrix based on vision standard deviations. */
+    public final void setVisionMeasurementStdDevs(Matrix<N4, N1> visionMeasurementStdDevs) {
+        var r = new double[4];
+        for (int i = 0; i < 4; ++i) {
+            r[i] = visionMeasurementStdDevs.get(i, 0) * visionMeasurementStdDevs.get(i, 0);
+        }
+
+        // Solve closed-form Kalman gain for continuous Kalman filter with A=0, C=I.
+        for (int row = 0; row < 4; ++row) {
+            if (m_q.get(row, 0) == 0.0) {
+                m_visionK.set(row, row, 0.0);
+            } else {
+                m_visionK.set(
+                    row, row,
+                    m_q.get(row, 0) /
+                        (m_q.get(row, 0) + Math.sqrt(m_q.get(row, 0) * r[row]))
+                );
+            }
+        }
+
+        // Apply same gain for rx, ry, rz
+        double angle_gain = m_visionK.get(3, 3);
+        m_visionK.set(4, 4, angle_gain);
+        m_visionK.set(5, 5, angle_gain);
+    }
+
+    /** Actually fuses a vision measurement into the pose estimate. */
+    private void fuseVisionMeasurement(Pose3d visionRobotPoseMeters, double timestampSeconds) {
+        m_visionUpdates.put(timestampSeconds, visionRobotPoseMeters);
+    }
+
+    /** Finds the closest odometry sample for given timestamp. */
+    private Optional<Pose3d> getOdometrySample(double timestamp) {
+        if (odometryPoseBuffer.containsKey(timestamp)) {
+            return Optional.of(odometryPoseBuffer.get(timestamp));
+        }
+        var floor = odometryPoseBuffer.floorEntry(timestamp);
+        var ceil = odometryPoseBuffer.ceilingEntry(timestamp);
+        if (floor == null && ceil == null) return Optional.empty();
+        if (floor == null) return Optional.of(ceil.getValue());
+        if (ceil == null) return Optional.of(floor.getValue());
+        return Optional.of(
+            Math.abs(timestamp - floor.getKey()) < Math.abs(ceil.getKey() - timestamp)
+                ? floor.getValue()
+                : ceil.getValue()
+        );
+    }
+
+    /** Returns current pose estimate. */
+    public Pose3d getPose() {
+        return poseMeters;
+    }
+
+    /**
+     * Updates pose with a timestamp, fusing odometry and latest vision if available.
+     */
+    public Pose3d updateWithTime(double currentTimeSeconds, double leftMeters, double rightMeters) {
+        // Step 1: Update odometry
+        Pose3d odometryEstimate = updatePose(leftMeters, rightMeters);
+
+        // Step 2: Add odometry sample to buffer
+        odometryPoseBuffer.put(currentTimeSeconds, odometryEstimate);
+
+        // Step 3: Fuse latest vision if available
+        if (!m_visionUpdates.isEmpty()) {
+            var latestVisionEntry = m_visionUpdates.lastEntry();
+            Pose3d visionPose = latestVisionEntry.getValue();
+            double visionTimestamp = latestVisionEntry.getKey();
+
+            if (visionTimestamp <= currentTimeSeconds) {
+                Twist3d twist = odometryEstimate.log(visionPose);
+                var k_times_twist = m_visionK.times(
+                    VecBuilder.fill(twist.dx, twist.dy, twist.dz, twist.rx, twist.ry, twist.rz)
+                );
+
+                Twist3d scaledTwist = new Twist3d(
+                    k_times_twist.get(0, 0),
+                    k_times_twist.get(1, 0),
+                    k_times_twist.get(2, 0),
+                    k_times_twist.get(3, 0),
+                    k_times_twist.get(4, 0),
+                    k_times_twist.get(5, 0)
+                );
+
+                poseMeters = odometryEstimate.exp(scaledTwist);
+            } else {
+                poseMeters = odometryEstimate;
+            }
+        } else {
+            poseMeters = odometryEstimate;
+        }
+
+        return poseMeters;
+    }
+}
+
+
+==== robot\TankDrive\TankSetPoint.java ====
+package frc.robot.TankDrive;
+//Finished, if anychange needed, please contact, rather than just editing the file.
+import edu.wpi.first.math.kinematics.DifferentialDriveWheelSpeeds;
+
+public record TankSetPoint(DifferentialDriveWheelSpeeds wheelSpeeds) {}
+
+==== robot\TankDrive\TankSetPointGenerator.java ====
+package frc.robot.TankDrive;
+
+import edu.wpi.first.math.kinematics.DifferentialDriveWheelSpeeds;
+import lombok.Builder;
+import lombok.Getter;
+import lombok.Setter;
+
+/**
+ * 254-style set-point generator for a differential (tank) drive.
+ *
+ * <p>
+ * Given the previous wheel speeds and a newly-requested wheel speed,
+ * produces a new set-point that obeys both the maximum linear velocity
+ * and the maximum linear acceleration of each side.
+ * </p>
+ */
+@Builder
+public class TankSetPointGenerator {
+
+    @Getter @Setter
+    private TankLimits limits;
+
+    /**
+     * Generate the next kinematically-feasible set-point.
+     *
+     * @param desiredSpeeds desired wheel speeds (from driver / path follower)
+     * @param prevSetpoint  previous set-point (contains already-limited speeds)
+     * @param dt            loop period, seconds
+     * @return next feasible set-point
+     */
+    public TankSetPoint generate(DifferentialDriveWheelSpeeds desiredSpeeds,
+                                 TankSetPoint prevSetpoint,
+                                 double dt) {
+
+        DifferentialDriveWheelSpeeds prev = prevSetpoint.wheelSpeeds();
+
+        /* ------------------------------------------------------------------
+         * 1.  Apply chassis-level limits (max velocity & max acceleration).
+         * ------------------------------------------------------------------ */
+        var result = limits.apply(prev, desiredSpeeds, dt);
+        DifferentialDriveWheelSpeeds limitedSpeeds = result.getFirst();
+        var accelLimits = result.getSecond();   // left & right max |a|
+
+        /* ------------------------------------------------------------------
+         * 2.  Clamp each side so that the *change* in speed from the
+         *     previous set-point does not exceed max acceleration.
+         * ------------------------------------------------------------------ */
+        double maxStepLeft  = accelLimits.getFirst().magnitude()  * dt;
+        double maxStepRight = accelLimits.getSecond().magnitude() * dt;
+
+        double newLeft  = clampDelta(limitedSpeeds.leftMetersPerSecond,
+                                     prev.leftMetersPerSecond,
+                                     maxStepLeft);
+        double newRight = clampDelta(limitedSpeeds.rightMetersPerSecond,
+                                     prev.rightMetersPerSecond,
+                                     maxStepRight);
+
+        return new TankSetPoint(
+                new DifferentialDriveWheelSpeeds(newLeft, newRight));
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* Helpers                                                                */
+    /* ---------------------------------------------------------------------- */
+
+    /** Clamp a speed so that |new - prev| smaller than or equals to maxDelta. */
+    private static double clampDelta(double desired,
+                                     double prev,
+                                     double maxDelta) {
+        double delta = desired - prev;
+        delta = Math.max(-maxDelta, Math.min(maxDelta, delta));
+        return prev + delta;
+    }
+}
+
+==== robot\TankDrive\TankSubsystem.java ====
+package frc.robot.TankDrive;
+
+import static edu.wpi.first.units.Units.MetersPerSecond;
+import static edu.wpi.first.units.Units.Seconds;
+import static edu.wpi.first.units.Units.Volts;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
+
+import org.littletonrobotics.junction.Logger;
+
+import edu.wpi.first.math.Matrix;
+import edu.wpi.first.math.Pair;
+import edu.wpi.first.math.VecBuilder;
+import edu.wpi.first.math.estimator.DifferentialDrivePoseEstimator3d;
+import edu.wpi.first.math.geometry.Pose3d;
+import edu.wpi.first.math.geometry.Rotation3d;
+import edu.wpi.first.math.kinematics.ChassisSpeeds;
+import edu.wpi.first.math.kinematics.DifferentialDriveKinematics;
+import edu.wpi.first.math.kinematics.DifferentialDriveWheelPositions;
+import edu.wpi.first.math.kinematics.DifferentialDriveWheelSpeeds;
+import edu.wpi.first.math.numbers.N1;
+import edu.wpi.first.math.numbers.N4;
+import edu.wpi.first.math.util.Units;
+import edu.wpi.first.units.measure.Current;
+import edu.wpi.first.units.measure.Distance;
+import edu.wpi.first.units.measure.LinearVelocity;
+import edu.wpi.first.units.measure.Time;
+import edu.wpi.first.units.measure.Voltage;
+import edu.wpi.first.wpilibj.Timer;
+import edu.wpi.first.wpilibj2.command.SubsystemBase;
+import frc.robot.TankDrive.Imu.ImuIO;
+import frc.robot.TankDrive.Imu.ImuIOInputsAutoLogged;
+import frc.robot.TankDrive.Side.Side;
+import frc.robot.TankDrive.Side.SideIO;
+import frc.utils.LoggedTracer;
+import lombok.Getter;
+
+public class TankSubsystem extends SubsystemBase {
+    static final Lock odomLock = new ReentrantLock();
+    private final DifferentialDriveKinematics kinematics;
+    private final DifferentialDrivePoseEstimator3d poseEstimatorUsingGyro;
+    private DifferentialDriveWheelPositions wheelPositions;
+        private final TankPoseEstimator tankPoseEstimator;
+        @Getter
+        private TankSetPoint currentSetPoint;
+            private final TankSetPointGenerator setPointGenerator;
+            private final TankConfigs configs;
+            private final Pair<Side, Side> sides;
+            private final ImuIO imuIO;
+            private final ImuIOInputsAutoLogged imuInputs;
+            private final boolean useGyro;
+            private MODE mode = MODE.VELOCITY;
+            @Getter
+            private Voltage previouslyAppliedVoltage;
+            double[] timeStamps;
+            
+        
+            public TankSubsystem(
+                TankConfigs configs,
+                TankDrivingStates state,
+                Pair<SideIO, SideIO> sideIOs,
+                ImuIO imuIO
+            ) {
+                this.wheelPositions = new DifferentialDriveWheelPositions(0.0d, 0.0d);
+                this.configs = configs;
+                this.kinematics = new DifferentialDriveKinematics(configs.trackWidth);
+                this.sides = new Pair<>(
+                    new Side(configs.sides.getFirst(), sideIOs.getFirst()),
+                    new Side(configs.sides.getSecond(), sideIOs.getSecond())
+                );
+                this.currentSetPoint = new TankSetPoint(new DifferentialDriveWheelSpeeds(0.0d, 0.0d));
+                this.setPointGenerator = TankSetPointGenerator.builder().limits(configs.tankLimits).build();
+                this.useGyro = !(state == TankDrivingStates.PURE_DRIVE);
+        
+                if (useGyro) {
+                    this.imuIO = imuIO;
+                    this.imuInputs = new ImuIOInputsAutoLogged();
+                    this.poseEstimatorUsingGyro = new DifferentialDrivePoseEstimator3d(
+                        kinematics,
+                        new Rotation3d(),
+                        this.wheelPositions.leftMeters,
+                        this.wheelPositions.rightMeters,
+                        new Pose3d()
+                    );
+                    this.tankPoseEstimator = null;
+                } else {
+                    this.imuIO = null;
+                    this.imuInputs = null;
+                    this.poseEstimatorUsingGyro = null;
+            
+                    Matrix<N4, N1> processNoise = VecBuilder.fill(
+                        0.02,  // X noise (meters)
+                        0.02,  // Y noise (meters)
+                        0.02,  // Z noise (meters)
+                        Units.degreesToRadians(1.0) // Heading noise (radians)
+                    );
+                
+                    this.tankPoseEstimator = new TankPoseEstimator(
+                        configs.trackWidth,
+                        new Pose3d(),
+                        processNoise
+                    );
+                }
+            }
+        
+            @Override
+            public void periodic() {
+                timeStamps = new double[]{Timer.getFPGATimestamp()};
+                sides.getFirst().periodic();
+                sides.getSecond().periodic();
+                sides.getFirst().updateInputs();
+                sides.getSecond().updateInputs();
+                odomLock.lock();
+                wheelPositions = new DifferentialDriveWheelPositions(sides.getFirst().getDriveDistance(), sides.getSecond().getDriveDistance());
+            var wheelsPositionWithTime = getSampledWheelPositions();
+            var now = Timer.getTimestamp();
+            if (useGyro) {
+                imuInputs.yawVelocityRadPerSecCmd = getChassisSpeeds().omegaRadiansPerSecond;
+                imuIO.updateInputs(imuInputs);
+                var rotations = imuInputs.odometryRotations;
+                Logger.processInputs(configs.name + "/IMU", imuInputs);
+                for(int i = 0; i < wheelsPositionWithTime.size(); i++){
+                    var positionAtTime = wheelsPositionWithTime.get(i);
+                    poseEstimatorUsingGyro.updateWithTime(now,
+                    rotations[i], positionAtTime.getSecond());
+                }
+                
+                Logger.recordOutput(configs.name+ "/PoseEstimatorPose", poseEstimatorUsingGyro.getEstimatedPosition());
+                odomLock.unlock();
+            }
+            else{
+                for(int i = 0; i < wheelsPositionWithTime.size(); i++){
+                    var positionAtTime = wheelsPositionWithTime.get(i);
+                    tankPoseEstimator.updateWithTime(now,
+                    positionAtTime.getSecond().leftMeters, positionAtTime.getSecond().rightMeters);
+                }
+                Logger.recordOutput(configs.name+ "/PoseEstimatorPose", tankPoseEstimator.getPose());
+                odomLock.unlock();
+            }
+    
+            LoggedTracer.record(configs.name + "/INPUTS");
+    
+            Logger.recordOutput(configs.name + "/Mode", mode);
+            Logger.recordOutput(configs.name + "/leftSpeed", getWheelSpeeds().leftMetersPerSecond);
+            Logger.recordOutput(configs.name + "/rightSpeed", getWheelSpeeds().rightMetersPerSecond);
+
+            Logger.recordOutput(configs.name + "/desiredveloleft", currentSetPoint.wheelSpeeds().leftMetersPerSecond);
+            Logger.recordOutput(configs.name + "/desiredveloright", currentSetPoint.wheelSpeeds().rightMetersPerSecond);
+        }
+    
+    
+        public ChassisSpeeds getChassisSpeeds() {
+            return kinematics.toChassisSpeeds(getWheelSpeeds());
+        }
+    
+        public DifferentialDriveWheelSpeeds getWheelSpeeds() {
+            return new DifferentialDriveWheelSpeeds(sides.getFirst().getVelocity(), sides.getSecond().getVelocity());
+        }
+        public DifferentialDriveWheelPositions getWheelPositions() {
+            return wheelPositions;
+        }
+    
+        public List<Pair<Double, DifferentialDriveWheelPositions>> getSampledWheelPositions() {
+            double[] timestamps = this.timeStamps;
+        
+            // Get sampled distances from left and right sides
+            Distance[] leftSamples = sides.getFirst().getSampledSideDistances();
+            Distance[] rightSamples = sides.getSecond().getSampledSideDistances();
+        
+            // Find minimum sample size to avoid index out of bounds
+            int sampleCount = Math.min(Math.min(leftSamples.length, rightSamples.length), timestamps.length);
+        
+            // Prepare result list
+            List<Pair<Double, DifferentialDriveWheelPositions>> result = new ArrayList<>(sampleCount);
+        
+            // For each timestamp, create the wheel positions
+            for (int i = 0; i < sampleCount; i++) {
+                DifferentialDriveWheelPositions positions = new DifferentialDriveWheelPositions(
+                    leftSamples[i],
+                    rightSamples[i]
+                );
+        
+                // Add timestamp + positions to result
+                result.add(new Pair<>(timestamps[i], positions));
+            }
+        
+            return result;
+        }
+        
+        public void addVisionMeasurement(
+          Pose3d visionRobotPoseMeters,
+          double timestampSeconds,
+          Matrix<N4, N1> visionMeasurementStdDevs) {
+            if(useGyro){
+                poseEstimatorUsingGyro.addVisionMeasurement(visionRobotPoseMeters, timestampSeconds, visionMeasurementStdDevs);
+            }
+            else{
+                tankPoseEstimator.addVisionMeasurement(visionRobotPoseMeters, timestampSeconds, visionMeasurementStdDevs);
+            }
+        }
+    
+        public Optional<Pose3d> getEstimatedPoseAt(Time time) {
+            if (useGyro) {
+                return poseEstimatorUsingGyro.sampleAt(time.in(Seconds));
+            }
+            else{
+                return tankPoseEstimator.sampleAt(time.in(Seconds));
+            }
+        }
+    
+        public void resetEstimatedPose(Pose3d pose) {
+            odomLock.lock();
+            if (useGyro) {
+                poseEstimatorUsingGyro.resetPosition(imuInputs.odometryRotations[0], getWheelPositions(), pose);
+            }
+            else{
+                tankPoseEstimator.resetPose(pose, getWheelPositions().leftMeters, getWheelPositions().rightMeters);
+            }
+            odomLock.unlock();
+        }
+    
+        public void runVoltage(Voltage voltage) {
+            mode = MODE.VOLTAGE;
+            previouslyAppliedVoltage = voltage;
+            sides.getFirst().runVoltage(voltage);
+            sides.getSecond().runVoltage(voltage);
+        }
+        public void runVelocity(DifferentialDriveWheelSpeeds velocity) {
+            mode = MODE.VELOCITY;
+            currentSetPoint = setPointGenerator.generate(velocity, currentSetPoint, 0.02);
+
+            sides.getFirst().runVelocity(MetersPerSecond.of(currentSetPoint.wheelSpeeds().leftMetersPerSecond));
+            sides.getSecond().runVelocity(MetersPerSecond.of(currentSetPoint.wheelSpeeds().rightMetersPerSecond));
+        }
+        public void runVelocity(DifferentialDriveWheelSpeeds velocity, Pair<Current, Current> tou){
+            mode = MODE.VELOCITY;
+            currentSetPoint = setPointGenerator.generate(velocity, currentSetPoint, 0.02);
+
+            sides.getFirst().runVelocity(MetersPerSecond.of(currentSetPoint.wheelSpeeds().leftMetersPerSecond), tou.getFirst());
+            sides.getSecond().runVelocity(MetersPerSecond.of(currentSetPoint.wheelSpeeds().rightMetersPerSecond), tou.getSecond());
+            
+        }
+
+        public void runStop() {
+            runVoltage(Volts.of(0.0d));
+        }
+    
+        public TankLimits getTankLimit(){
+            return setPointGenerator.getLimits();
+        }
+
+        public void setTankLimit(TankLimits tankLimits){
+            setPointGenerator.setLimits(tankLimits);
+        }
+
+        public void setTankLimitDefult(){
+            setPointGenerator.setLimits(configs.tankLimits);
+        }
+
+        public DifferentialDriveKinematics getKinematics() {
+            return kinematics;
+        }
+
+    //add as much as you want
+    public enum TankDrivingStates {
+        PURE_DRIVE,
+        WITH_PIGEON
+    }
+
+    public enum MODE {
+        VELOCITY, VOLTAGE
+    }
+}
+
+
+==== robot\TankDrive\Commands\TankDriveToPoseCommand.java ====
+package frc.robot.TankDrive.Commands;
+
+import edu.wpi.first.math.controller.PIDController;
+import edu.wpi.first.math.geometry.Pose3d;
+import edu.wpi.first.math.kinematics.ChassisSpeeds;
+import edu.wpi.first.math.kinematics.DifferentialDriveWheelSpeeds;
+import edu.wpi.first.units.measure.Angle;
+import edu.wpi.first.units.measure.Distance;
+import edu.wpi.first.wpilibj2.command.Command;
+import frc.robot.TankDrive.TankSubsystem;
+
+import java.util.function.Supplier;
+
+import static edu.wpi.first.units.Units.Meters;
+import static edu.wpi.first.units.Units.Radians;
+
+/**
+ * Closed-loop PID command that drives the robot to a desired pose.
+ */
+public class TankDriveToPoseCommand extends Command {
+
+    private final TankSubsystem tank;
+    private final Supplier<Pose3d> robotPose;
+    private final Supplier<Pose3d> targetPose;
+    private final PIDController xController;
+    private final PIDController thetaController;
+    private final Distance translationTolerance;
+    private final Angle rotationTolerance;
+
+    public TankDriveToPoseCommand(
+            TankSubsystem tank,
+            Supplier<Pose3d> robotPose,
+            Supplier<Pose3d> targetPose,
+            PIDController xController,
+            PIDController thetaController,
+            Distance translationTolerance,
+            Angle rotationTolerance
+    ) {
+        this.tank = tank;
+        this.robotPose = robotPose;
+        this.targetPose = targetPose;
+        this.xController = xController;
+        this.thetaController = thetaController;
+        this.translationTolerance = translationTolerance;
+        this.rotationTolerance = rotationTolerance;
+
+        thetaController.enableContinuousInput(-Math.PI, Math.PI);
+        addRequirements(tank);
+    }
+
+    @Override
+    public void initialize() {
+        xController.reset();
+        thetaController.reset();
+    }
+
+    @Override
+    public void execute() {
+        Pose3d current = robotPose.get();
+        Pose3d goal    = targetPose.get();
+
+        // error vectors in field frame
+        double dx = goal.getX() - current.getX();
+        double dy = goal.getY() - current.getY();
+        double distError = Math.hypot(dx, dy);
+        double angleError = goal.getRotation().toRotation2d().minus(current.getRotation().toRotation2d()).getRadians();
+
+        // PID outputs (simple P for now)
+        double linVel = xController.calculate(distError, 0);
+        double angVel = thetaController.calculate(angleError, 0);
+
+        // convert to wheel speeds
+        ChassisSpeeds speeds = new ChassisSpeeds(linVel, 0, angVel);
+        DifferentialDriveWheelSpeeds wheelSpeeds = tank.getKinematics().toWheelSpeeds(speeds);
+        tank.runVelocity(wheelSpeeds);
+    }
+
+    @Override
+    public boolean isFinished() {
+        Pose3d current = robotPose.get();
+        Pose3d goal    = targetPose.get();
+
+        double dist = current.getTranslation().getDistance(goal.getTranslation());
+        double angle = Math.abs(current.getRotation().toRotation2d().minus(goal.getRotation().toRotation2d()).getRadians());
+        return dist < translationTolerance.in(Meters) && angle < rotationTolerance.in(Radians);
+    }
+
+    @Override
+    public void end(boolean interrupted) {
+        tank.runStop();
+    }
+}
+
+==== robot\TankDrive\Commands\TankFollowPathPlannerCommand.java ====
+package frc.robot.TankDrive.Commands;
+
+import com.pathplanner.lib.events.Event;
+import com.pathplanner.lib.path.PathPlannerPath;
+import com.pathplanner.lib.trajectory.PathPlannerTrajectory;
+import com.pathplanner.lib.trajectory.PathPlannerTrajectoryState;
+import edu.wpi.first.math.controller.PIDController;
+import edu.wpi.first.math.geometry.Pose3d;
+import edu.wpi.first.math.kinematics.ChassisSpeeds;
+import edu.wpi.first.math.kinematics.DifferentialDriveWheelSpeeds;
+import edu.wpi.first.units.measure.Distance;
+import edu.wpi.first.wpilibj.Timer;
+import edu.wpi.first.wpilibj2.command.Command;
+import frc.robot.TankDrive.TankSubsystem;
+
+import java.util.*;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
+
+import static edu.wpi.first.units.Units.Meters;
+
+/**
+ * Follow a PathPlanner trajectory on a tank drive.
+ * It uses left/right velocity PID + optional feed-forward from the trajectory.
+ */
+public class TankFollowPathPlannerCommand extends Command {
+
+    private final TankSubsystem tank;
+    private final PathPlannerTrajectory trajectory;
+    private final Supplier<Pose3d> robotPose;
+    private final PIDController leftPid;
+    private final PIDController rightPid;
+    private final Distance tolerance;
+    private final Consumer<Event> eventConsumer;
+
+    private final Timer timer = new Timer();
+    private final Queue<Event> eventQueue = new LinkedList<>();
+
+    public TankFollowPathPlannerCommand(
+            TankSubsystem tank,
+            PathPlannerTrajectory trajectory,
+            Supplier<Pose3d> robotPose,
+            PIDController leftPid,
+            PIDController rightPid,
+            Distance tolerance,
+            Consumer<Event> eventConsumer) {
+
+        this.tank = tank;
+        this.trajectory = trajectory;
+        this.robotPose = robotPose;
+        this.leftPid = leftPid;
+        this.rightPid = rightPid;
+        this.tolerance = tolerance;
+        this.eventConsumer = eventConsumer;
+
+        // Sort events by timestamp for easy polling
+        List<Event> events = trajectory.getEvents();
+        events.sort(Comparator.comparingDouble(Event::getTimestampSeconds));
+        eventQueue.addAll(events);
+
+        addRequirements(tank);
+    }
+
+    @Override
+    public void initialize() {
+        leftPid.reset();
+        rightPid.reset();
+        timer.reset();
+        timer.start();
+    }
+
+    @Override
+    public void execute() {
+        double t = timer.get();
+        PathPlannerTrajectoryState state = trajectory.sample(t);
+
+        // Feed-forward chassis speeds
+        ChassisSpeeds ffSpeeds = state.fieldSpeeds;
+        DifferentialDriveWheelSpeeds ffWheels = tank.getKinematics().toWheelSpeeds(ffSpeeds);
+
+        // Current wheel speeds
+        DifferentialDriveWheelSpeeds now = tank.getWheelSpeeds();
+
+        // PID feedback on velocity
+        double leftFB  = leftPid.calculate(now.leftMetersPerSecond,  ffWheels.leftMetersPerSecond);
+        double rightFB = rightPid.calculate(now.rightMetersPerSecond, ffWheels.rightMetersPerSecond);
+
+        // Combine
+        DifferentialDriveWheelSpeeds cmd = new DifferentialDriveWheelSpeeds(
+                ffWheels.leftMetersPerSecond + leftFB,
+                ffWheels.rightMetersPerSecond + rightFB);
+
+        tank.runVelocity(cmd);
+
+        // Fire events
+        while (eventConsumer != null &&
+               !eventQueue.isEmpty() &&
+               eventQueue.peek().getTimestampSeconds() <= t) {
+            eventConsumer.accept(eventQueue.poll());
+        }
+    }
+
+    @Override
+    public void end(boolean interrupted) {
+        tank.runStop();
+    }
+
+    @Override
+    public boolean isFinished() {
+        return timer.hasElapsed(trajectory.getTotalTimeSeconds()) &&
+               robotPose.get().toPose2d().getTranslation()
+                        .getDistance(trajectory.getEndState().pose.getTranslation())
+               < tolerance.in(Meters);
+    }
+}
+
+==== robot\TankDrive\Commands\TankFollowTrajectoryCommand.java ====
+package frc.robot.TankDrive.Commands;
+
+import edu.wpi.first.math.controller.PIDController;
+import edu.wpi.first.math.geometry.Pose3d;
+import edu.wpi.first.math.geometry.Translation2d;
+import edu.wpi.first.math.geometry.Translation3d;
+import edu.wpi.first.math.kinematics.DifferentialDriveWheelSpeeds;
+import edu.wpi.first.math.trajectory.Trajectory;
+import edu.wpi.first.units.measure.Distance;
+import edu.wpi.first.wpilibj.Timer;
+import edu.wpi.first.wpilibj2.command.Command;
+import frc.robot.TankDrive.TankSubsystem;
+
+import java.util.function.Supplier;
+
+import static edu.wpi.first.units.Units.Meters;
+
+/**
+ * Follow a WPILib differential-drive trajectory with left/right velocity PID.
+ */
+public class TankFollowTrajectoryCommand extends Command {
+
+    private final TankSubsystem tank;
+    private final Trajectory trajectory;
+    private final Supplier<Pose3d> robotPose;
+    private final PIDController leftPid;
+    private final PIDController rightPid;
+    private final Distance tolerance;
+
+    private final Timer timer = new Timer();
+
+    public TankFollowTrajectoryCommand(
+            TankSubsystem tank,
+            Trajectory trajectory,
+            Supplier<Pose3d> robotPose,
+            PIDController leftPid,
+            PIDController rightPid,
+            Distance tolerance) {
+
+        this.tank = tank;
+        this.trajectory = trajectory;
+        this.robotPose = robotPose;
+        this.leftPid = leftPid;
+        this.rightPid = rightPid;
+        this.tolerance = tolerance;
+        addRequirements(tank);
+    }
+
+    @Override
+    public void initialize() {
+        leftPid.reset();
+        rightPid.reset();
+        timer.reset();
+        timer.start();
+    }
+
+    @Override
+    public void execute() {
+        double t = timer.get();
+        var desiredState = trajectory.sample(t);
+
+        // Current wheel distances (m)
+        var currentPose = robotPose.get();
+        double leftNow  = tank.getWheelPositions().leftMeters;
+        double rightNow = tank.getWheelPositions().rightMeters;
+
+        // Desired wheel distances (m)
+        double leftDes  = desiredState.poseMeters.getX() - trajectory.getInitialPose().getX();
+        double rightDes = leftDes;   // straight line, same for both wheels
+        // NOTE: For curved paths you would integrate the arc length for each side.
+        // WPILib's DifferentialDriveWheelSpeeds already gives left/right velocities,
+        // so for full correctness you should use the velocity feed-forward and
+        // close the loop on distance error.  Below is the simple version.
+
+        // PID on *position* (distance) error
+        double leftVel  = leftPid.calculate(leftNow,  leftDes);
+        double rightVel = rightPid.calculate(rightNow, rightDes);
+
+        tank.runVelocity(new DifferentialDriveWheelSpeeds(leftVel, rightVel));
+    }
+
+    @Override
+    public void end(boolean interrupted) {
+        tank.runStop();
+    }
+
+    @Override
+    public boolean isFinished() {
+        return timer.hasElapsed(trajectory.getTotalTimeSeconds()) &&
+               robotPose.get().getTranslation()
+                        .getDistance(new Translation3d(trajectory.getStates().get(trajectory.getStates().size() - 1)
+                                               .poseMeters.getTranslation()))
+               < tolerance.in(Meters);
+    }
+}
+
+==== robot\TankDrive\Imu\ImuIO.java ====
+package frc.robot.TankDrive.Imu;
+//Finished, if anychange needed, please contact, rather than just editing the file.
+import edu.wpi.first.math.geometry.Rotation2d;
+import edu.wpi.first.math.geometry.Rotation3d;
+import org.littletonrobotics.junction.AutoLog;
+
+public interface ImuIO {
+    // read
+    default void updateInputs(ImuIOInputs inputs) {
+    }
+
+    default void reset() {}
+
+
+    @AutoLog
+    class ImuIOInputs {
+        public boolean connected = false;
+        public Rotation2d yawPosition = new Rotation2d();
+        public double yawVelocityRadPerSec = 0.0;
+        public double yawVelocityRadPerSecCmd = 0.0;
+        public Rotation2d pitchPosition = new Rotation2d();
+        public double pitchVelocityRadPerSec = 0.0;
+        public Rotation2d rollPosition = new Rotation2d();
+        public double rollVelocityRadPerSec = 0.0;
+        public double[] odometryYawTimestamps = new double[0];
+        public Rotation2d[] odometryYawPositions = new Rotation2d[0];
+        public Rotation3d[] odometryRotations = new Rotation3d[0];
+    }
+
+}
+
+
+==== robot\TankDrive\Imu\ImuIOPigeon1.java ====
+package frc.robot.TankDrive.Imu;
+//Finished, if anychange needed, please contact, rather than just editing the file.
+import static edu.wpi.first.units.Units.DegreesPerSecond;
+
+import java.util.ArrayDeque;
+import java.util.Queue;
+import com.ctre.phoenix.sensors.PigeonIMU;
+import edu.wpi.first.math.geometry.Rotation2d;
+import edu.wpi.first.math.geometry.Rotation3d;
+import edu.wpi.first.units.Units;
+import edu.wpi.first.wpilibj.Timer;
+import frc.robot.TankDrive.TankConfigs;
+import frc.robot.TankDrive.TankConfigs.SideConfigsReal;
+
+public class ImuIOPigeon1 implements ImuIO{
+    private final PigeonIMU pigeon;
+
+    private final Timer timer = new Timer();
+
+    private final SideConfigsReal configs;
+
+    // Status signals
+        private Double yaw;
+        private Double yawVelocity;
+        private Double pitch;
+        private Double pitchVelocity;
+        private Double roll;
+        private Double rollVelocity;
+        
+        // Odometry queues (only for yaw since that's what's needed for pose estimation)
+        private Queue<Double> yawPositionQueue;
+        private Queue<Double> timestampQueue;
+    
+        public ImuIOPigeon1(SideConfigsReal configs){
+            timer.reset();
+            timer.start();
+            this.configs = configs;
+            
+            System.out.println("ImuIOPigeon: Initializing Pigeon2 with ID " + configs.pigeonId);
+    
+            pigeon = new PigeonIMU(configs.pigeonId);
+    
+            
+    
+            yaw = pigeon.getYaw();
+            yawVelocity = 0.0;
+            pitch = pigeon.getPitch();
+            pitchVelocity = 0.0;
+            roll = pigeon.getRoll();
+            rollVelocity = 0.0;
+    
+            pigeon.clearStickyFaults();
+            
+            // Fallback queues if sync thread registration fails
+            if (yawPositionQueue == null) {
+                yawPositionQueue = new ArrayDeque<>();
+            }
+            if (timestampQueue == null) {
+                timestampQueue = new ArrayDeque<>();
+            }
+        }
+    
+        @Override
+        public void updateInputs(ImuIOInputs inputs) {
+            yaw = pigeon.getYaw();
+            yawVelocity = getYawRate(configs.deltaTimeInSeconds);
+            pitch = pigeon.getPitch();
+            pitchVelocity = getPitchRate(configs.deltaTimeInSeconds);
+            roll = pigeon.getRoll();
+            rollVelocity = getRollRate(configs.deltaTimeInSeconds);
+
+            inputs.connected = !(yaw == null || pitch == null || roll == null);
+
+            // Current positions and velocities
+            inputs.yawPosition = Rotation2d.fromDegrees(yaw);
+            inputs.yawVelocityRadPerSec = DegreesPerSecond.of(yawVelocity).in(Units.RadiansPerSecond);
+            inputs.pitchPosition = Rotation2d.fromDegrees(pitch);
+            inputs.pitchVelocityRadPerSec = DegreesPerSecond.of(pitchVelocity).in(Units.RadiansPerSecond);
+            inputs.rollPosition = Rotation2d.fromDegrees(roll);
+            inputs.rollVelocityRadPerSec = DegreesPerSecond.of(rollVelocity).in(Units.RadiansPerSecond);
+            
+            // Process odometry queues (same pattern as swerve modules)
+            if (!yawPositionQueue.isEmpty() && !timestampQueue.isEmpty()) {
+                // Convert queue data to arrays
+                int queueSize = Math.min(yawPositionQueue.size(), timestampQueue.size());
+                
+                inputs.odometryYawTimestamps = new double[queueSize];
+                inputs.odometryYawPositions = new Rotation2d[queueSize];
+                inputs.odometryRotations = new Rotation3d[queueSize];
+                
+                for (int i = 0; i < queueSize; i++) {
+                    double timestamp = timestampQueue.poll();
+                    double yawDegrees = yawPositionQueue.poll();
+                    
+                    inputs.odometryYawTimestamps[i] = timestamp;
+                    inputs.odometryYawPositions[i] = Rotation2d.fromDegrees(yawDegrees);
+                    inputs.odometryRotations[i] = new Rotation3d(
+                        inputs.rollPosition.getRadians(),
+                        inputs.pitchPosition.getRadians(),
+                        Rotation2d.fromDegrees(yawDegrees).getRadians()
+                    );
+                }
+                
+                // Clear any remaining queue items to stay synchronized
+                yawPositionQueue.clear();
+                timestampQueue.clear();
+            } else {
+                // Fallback to current values if no queue data
+                inputs.odometryYawTimestamps = new double[]{timer.get()};
+                inputs.odometryYawPositions = new Rotation2d[]{inputs.yawPosition};
+                inputs.odometryRotations = new Rotation3d[]{
+                    new Rotation3d(
+                        inputs.rollPosition.getRadians(),
+                        inputs.pitchPosition.getRadians(),
+                        inputs.yawPosition.getRadians()
+                    )
+                };
+            }
+    }
+
+    private final double getYawRate(double dt){
+        double lastYaw = pigeon.getYaw();
+        Timer.delay(configs.deltaTimeInSeconds);
+        double currentYaw = pigeon.getYaw();
+        double yawRate = (currentYaw - lastYaw) / dt;
+        return yawRate;
+    }
+    private final double getPitchRate(double dt){
+        double lastPitch = pigeon.getPitch();
+        Timer.delay(configs.deltaTimeInSeconds);
+        double currentPitch = pigeon.getPitch();
+        double pitchRate = (currentPitch - lastPitch) / dt;
+        return pitchRate;
+    }
+    private final double getRollRate(double dt){
+        double lastRoll = pigeon.getRoll();
+        Timer.delay(configs.deltaTimeInSeconds);
+        double currentRoll = pigeon.getRoll();
+        double rollRate = (currentRoll - lastRoll) / dt;
+        return rollRate;
+    }
+
+
+}
+
+
+==== robot\TankDrive\Imu\ImuIOPigeon2.java ====
+package frc.robot.TankDrive.Imu;
+//Finished, if anychange needed, please contact, rather than just editing the file.
+import java.util.ArrayDeque;
+import java.util.Queue;
+import com.ctre.phoenix6.BaseStatusSignal;
+import com.ctre.phoenix6.StatusSignal;
+import com.ctre.phoenix6.hardware.Pigeon2;
+
+import edu.wpi.first.math.geometry.Rotation2d;
+import edu.wpi.first.math.geometry.Rotation3d;
+import edu.wpi.first.units.Units;
+import edu.wpi.first.units.measure.Angle;
+import edu.wpi.first.units.measure.AngularVelocity;
+import frc.robot.TankDrive.TankConfigs;
+import frc.robot.TankDrive.Side.SideIOReal;
+import frc.robot.TankDrive.TankConfigs.SideConfigsReal;
+import frc.utils.PhoenixSynchronizationThread;
+import frc.utils.PhoenixUtils;
+
+public class ImuIOPigeon2 implements ImuIO{
+    private final Pigeon2 pigeon2;
+
+    private static PhoenixSynchronizationThread syncThread = SideIOReal.getSyncThread();
+
+    private final SideConfigsReal configs;
+
+    // Status signals
+    private final StatusSignal<Angle> yaw;
+    private final StatusSignal<AngularVelocity> yawVelocity;
+    private final StatusSignal<Angle> pitch;
+    private final StatusSignal<AngularVelocity> pitchVelocity;
+    private final StatusSignal<Angle> roll;
+    private final StatusSignal<AngularVelocity> rollVelocity;
+    
+    // Odometry queues (only for yaw since that's what's needed for pose estimation)
+    private Queue<Double> yawPositionQueue;
+    private Queue<Double> timestampQueue;
+
+
+    public ImuIOPigeon2(SideConfigsReal configs) {
+
+        System.out.println("ImuIOPigeon: Initializing Pigeon2 with ID " + configs.pigeonId);
+        
+        this.pigeon2 = new Pigeon2(configs.pigeonId, configs.canivoreCanBusName);
+        this.configs = configs;
+
+        syncThread = SideIOReal.getSyncThread();
+
+        yaw = pigeon2.getYaw();
+        yawVelocity = pigeon2.getAngularVelocityZWorld();
+        pitch = pigeon2.getPitch();
+        pitchVelocity = pigeon2.getAngularVelocityYWorld();
+        roll = pigeon2.getRoll();
+        rollVelocity = pigeon2.getAngularVelocityXWorld();
+
+        configureSignalFrequencies();
+        
+        // Register signals with PhoenixUtils for automatic refresh (same as swerve modules)
+        PhoenixUtils.registerSignals(
+                true,
+                yaw,
+                yawVelocity,
+                pitch,
+                pitchVelocity,
+                roll,
+                rollVelocity
+        );
+
+        if (syncThread != null) {
+            yawPositionQueue = syncThread.registerSignal(yaw.clone());
+            timestampQueue = syncThread.makeTimestampQueue();
+        }
+        
+        // Fallback queues if sync thread registration fails
+        if (yawPositionQueue == null) {
+            yawPositionQueue = new ArrayDeque<>();
+        }
+        if (timestampQueue == null) {
+            timestampQueue = new ArrayDeque<>();
+        }
+        
+        pigeon2.clearStickyFaults();
+        pigeon2.optimizeBusUtilization();
+        
+        System.out.println("ImuIOPigeon: Pigeon2 initialized successfully");
+        
+    }
+
+    private void configureSignalFrequencies() {
+        // High priority signals for control (100Hz = 10ms)
+        yaw.setUpdateFrequency(configs.odometryFrequency);
+        yawVelocity.setUpdateFrequency(configs.odometryFrequency);
+        
+        // Medium priority signals for telemetry (50Hz = 20ms) 
+        pitch.setUpdateFrequency(50.0);
+        pitchVelocity.setUpdateFrequency(50.0);
+        roll.setUpdateFrequency(50.0);
+        rollVelocity.setUpdateFrequency(50.0);
+    }
+
+    @Override
+    public void reset() {
+        pigeon2.reset();
+    }
+
+    @Override
+    public void updateInputs(ImuIOInputs inputs) {
+        // Phoenix utils handles refreshing automatically, so we just read values
+        inputs.connected = BaseStatusSignal.isAllGood(yaw, yawVelocity, pitch, pitchVelocity, roll, rollVelocity);
+        
+        // Current positions and velocities
+        inputs.yawPosition = Rotation2d.fromDegrees(yaw.getValueAsDouble());
+        inputs.yawVelocityRadPerSec = yawVelocity.getValue().in(Units.RadiansPerSecond);
+        inputs.pitchPosition = Rotation2d.fromDegrees(pitch.getValueAsDouble());
+        inputs.pitchVelocityRadPerSec = pitchVelocity.getValue().in(Units.RadiansPerSecond);
+        inputs.rollPosition = Rotation2d.fromDegrees(roll.getValueAsDouble());
+        inputs.rollVelocityRadPerSec = rollVelocity.getValue().in(Units.RadiansPerSecond);
+        
+        // Process odometry queues (same pattern as swerve modules)
+        if (!yawPositionQueue.isEmpty() && !timestampQueue.isEmpty()) {
+            // Convert queue data to arrays
+            int queueSize = Math.min(yawPositionQueue.size(), timestampQueue.size());
+            
+            inputs.odometryYawTimestamps = new double[queueSize];
+            inputs.odometryYawPositions = new Rotation2d[queueSize];
+            inputs.odometryRotations = new Rotation3d[queueSize];
+            
+            for (int i = 0; i < queueSize; i++) {
+                double timestamp = timestampQueue.poll();
+                double yawDegrees = yawPositionQueue.poll();
+                
+                inputs.odometryYawTimestamps[i] = timestamp;
+                inputs.odometryYawPositions[i] = Rotation2d.fromDegrees(yawDegrees);
+                inputs.odometryRotations[i] = new Rotation3d(
+                    inputs.rollPosition.getRadians(),
+                    inputs.pitchPosition.getRadians(),
+                    Rotation2d.fromDegrees(yawDegrees).getRadians()
+                );
+            }
+            
+            // Clear any remaining queue items to stay synchronized
+            yawPositionQueue.clear();
+            timestampQueue.clear();
+        } else {
+            // Fallback to current values if no queue data
+            inputs.odometryYawTimestamps = new double[]{yaw.getTimestamp().getTime()};
+            inputs.odometryYawPositions = new Rotation2d[]{inputs.yawPosition};
+            inputs.odometryRotations = new Rotation3d[]{
+                new Rotation3d(
+                    inputs.rollPosition.getRadians(),
+                    inputs.pitchPosition.getRadians(),
+                    inputs.yawPosition.getRadians()
+                )
+            };
+        }
+    }
+}
+
+
+==== robot\TankDrive\Imu\ImuIOSim.java ====
+package frc.robot.TankDrive.Imu;
+//Finished, if anychange needed, please contact, rather than just editing the file.
+import edu.wpi.first.math.geometry.Rotation2d;
+import edu.wpi.first.math.geometry.Rotation3d;
+import edu.wpi.first.wpilibj.Timer;
+
+public class ImuIOSim implements ImuIO {
+    public ImuIOSim() {
+
+    }
+
+    @Override
+    public void updateInputs(ImuIOInputs inputs) {
+        inputs.connected = true;
+        inputs.yawPosition = inputs.yawPosition.plus(new Rotation2d(inputs.yawVelocityRadPerSecCmd * 0.3));
+        inputs.yawVelocityRadPerSec = inputs.yawVelocityRadPerSecCmd;
+        inputs.pitchPosition = new Rotation2d();
+        inputs.pitchVelocityRadPerSec = 0.0;
+        inputs.rollPosition = new Rotation2d();
+        inputs.rollVelocityRadPerSec = 0.0;
+        inputs.odometryYawTimestamps = new double[]{Timer.getTimestamp()};
+        inputs.odometryYawPositions = new Rotation2d[]{inputs.yawPosition};
+        inputs.odometryRotations = new Rotation3d[]{
+                new Rotation3d(
+                        inputs.rollPosition.getMeasure(),
+                        inputs.pitchPosition.getMeasure(),
+                        inputs.yawPosition.getMeasure()
+                )
+        };
+    }
+}
+
+
+==== robot\TankDrive\Side\Side.java ====
+package frc.robot.TankDrive.Side;
+import static edu.wpi.first.units.Units.Meters;
+import static edu.wpi.first.units.Units.MetersPerSecond;
+
+import org.littletonrobotics.junction.Logger;
+
+import edu.wpi.first.units.measure.Current;
+import edu.wpi.first.units.measure.Distance;
+import edu.wpi.first.units.measure.LinearVelocity;
+import edu.wpi.first.units.measure.Voltage;
+import frc.robot.TankParamsNT;
+import frc.robot.TankDrive.TankConfigs;
+import frc.robot.TankDrive.TankConfigs.SideConfigs;
+
+public class Side {
+    private final SideIO io;
+    private final SideIOInputsAutoLogged[] data;
+
+    private final SideConfigs configs;
+    private final int motorNum;
+    private final Distance wheelDiameter;
+
+    public Side(SideConfigs configs, SideIO io) {
+        this.configs = configs;
+        this.io = io;
+        this.motorNum = configs instanceof TankConfigs.SideConfigsReal ?
+        ((TankConfigs.SideConfigsReal) configs).motorNumber() :
+        ((TankConfigs.SideConfigsSim) configs).motorNumber();
+        this.wheelDiameter = configs instanceof TankConfigs.SideConfigsReal ?
+        ((TankConfigs.SideConfigsReal) configs).wheelDiameter :
+        ((TankConfigs.SideConfigsSim) configs).wheelDiameter;
+        this.data = new SideIOInputsAutoLogged[motorNum];
+        for(int i = 0; i < motorNum; i++){
+            this.data[i] = new SideIOInputsAutoLogged();
+        }
+        updateDriveController();
+    }
+
+     
+
+    public void updateInputs() {
+        io.updateInputs(data);
+        for(int i = 0; i < motorNum; i++){
+            Logger.processInputs(configs.getName() + "/Motor/" + (i+1), data[i]);
+        }
+    }
+
+
+    private void updateDriveController() {
+        double kp = TankParamsNT.kP.getValue();
+        double ki = TankParamsNT.kI.getValue();
+        double kd = TankParamsNT.kD.getValue();
+        double ks = TankParamsNT.kS.getValue();
+        double kv = TankParamsNT.kV.getValue();
+        double ka = TankParamsNT.kA.getValue();
+        io.configSideController(kp, ki, kd, ks, kv, ka);
+    }
+
+    public void periodic() {
+        io.updateInputs(data);
+        if(TankParamsNT.isAnyChanged()){
+            updateDriveController();
+        }
+        Logger.recordOutput(configs.getName(), TankParamsNT.isAnyChanged());
+    }
+
+    public void runVoltage(Voltage voltage){
+        io.setDriveOpenLoop(voltage);
+    }
+
+
+    public void runVelocity(LinearVelocity velocity){
+        io.setDriveVelocity(velocity);
+    }
+
+    public void runVelocity(LinearVelocity velocity, Current ff){
+        io.setDriveVelocity(velocity, ff);
+    }
+
+    public void runStop(){
+        runVelocity(MetersPerSecond.zero());
+    }
+
+    public Distance getDriveDistance() {
+        double totalDistance = 0;
+        for(int i = 0; i < motorNum; i++){
+            totalDistance += data[i].sideMotorPositionRad;
+        }
+        double avgDistance = totalDistance / motorNum;
+        return wheelDiameter.times(avgDistance * 0.5);
+    }
+
+    public LinearVelocity getVelocity(){
+        double totalVelocity = 0;
+        for(int i = 0; i < motorNum; i++){
+            totalVelocity += data[i].sideMotorVelocityRadPerSec;
+        }
+        double avgVelocity = totalVelocity / motorNum;
+        return MetersPerSecond.of(avgVelocity * 0.5 * wheelDiameter.in(Meters));
+    }
+
+    public Distance[] getSampledSideDistances() {
+        int sampleCount = data[0].sideMotorPositionRadSamples.length;
+        int temp;
+        for(int i = 0; i < motorNum; i++){
+            temp = data[i].sideMotorPositionRadSamples.length;
+            if (sampleCount > temp) {
+                sampleCount = temp;
+            }
+            else{
+                continue;
+            }
+        }
+        Distance[] distances = new Distance[sampleCount];
+        double distance = 0.0;
+        double totalDistance = 0.0;
+        for (int i = 0; i < sampleCount; i++){
+            for(int j = 0; j < motorNum; j++){
+                distance = data[j].sideMotorPositionRadSamples[i];
+                totalDistance += distance;
+            }
+            distances[i] = wheelDiameter.times(totalDistance / motorNum * 0.5);
+            totalDistance = 0.0;
+        }
+            
+        return distances;
+    }
+}
+
+
+==== robot\TankDrive\Side\SideIO.java ====
+package frc.robot.TankDrive.Side;
+//Finished, if anychange needed, please contact, rather than just editing the file.
+import static edu.wpi.first.units.Units.MetersPerSecond;
+
+import org.littletonrobotics.junction.AutoLog;
+
+import edu.wpi.first.units.measure.Current;
+import edu.wpi.first.units.measure.LinearVelocity;
+import edu.wpi.first.units.measure.Voltage;
+
+public interface SideIO {
+    default void updateInputs(SideIOInputs[] inputs) {
+    }
+
+    // set
+    default void setDriveOpenLoop(Voltage des) {
+    }
+    default void setDriveVelocity(LinearVelocity des) {
+    }
+    default void setDriveVelocity(LinearVelocity des, Current ff) {
+        setDriveVelocity(des);
+    }
+
+    // config
+    default void configSideController(double kp, double ki, double kd, double ks, double kv, double ka) {
+    }
+    default void configDriveBrake(boolean isBreak) {
+    }
+
+    @AutoLog
+    class SideIOInputs {
+        public boolean sideMotorConnected;
+        public double sideMotorPositionRad;
+        public double[] sideMotorPositionRadSamples;
+        public double sideMotorVelocityRadPerSec;
+        public double sideMotorTemperatureCel;
+        public double sideMotorVoltageVolt;
+        public double sideMotorSupplyCurrentAmpere;
+        public double sideMotorTorqueCurrentAmpere;
+    }
+}
+
+
+==== robot\TankDrive\Side\SideIOReal.java ====
+package frc.robot.TankDrive.Side;
+//Finished, if anychange needed, please contact, rather than just editing the file.
+import static edu.wpi.first.units.Units.Amps;
+import static edu.wpi.first.units.Units.Meter;
+import static edu.wpi.first.units.Units.MetersPerSecond;
+import static edu.wpi.first.units.Units.Volt;
+
+import java.util.ArrayList;
+import java.util.Queue;
+import java.util.concurrent.locks.ReentrantLock;
+
+import com.ctre.phoenix6.BaseStatusSignal;
+import com.ctre.phoenix6.StatusSignal;
+import com.ctre.phoenix6.configs.TalonFXConfiguration;
+import com.ctre.phoenix6.controls.VelocityTorqueCurrentFOC;
+import com.ctre.phoenix6.controls.VoltageOut;
+import com.ctre.phoenix6.hardware.TalonFX;
+import com.ctre.phoenix6.signals.InvertedValue;
+import com.ctre.phoenix6.signals.NeutralModeValue;
+import edu.wpi.first.math.util.Units;
+import edu.wpi.first.units.measure.Angle;
+import edu.wpi.first.units.measure.AngularVelocity;
+import edu.wpi.first.units.measure.Current;
+import edu.wpi.first.units.measure.LinearVelocity;
+import edu.wpi.first.units.measure.Temperature;
+import edu.wpi.first.units.measure.Voltage;
+import frc.robot.TankDrive.TankConfigs.SideConfigsReal;
+import frc.utils.PhoenixSynchronizationThread;
+import frc.utils.PhoenixUtils;
+import lombok.Getter;
+
+public class SideIOReal implements SideIO {
+    @Getter
+    private static PhoenixSynchronizationThread syncThread;
+
+    @Getter
+    private static final ReentrantLock syncLock = new ReentrantLock();
+
+    private final ArrayList<TalonFX> motors;
+    private final ArrayList<TalonFXConfiguration> talonFxConfigs;
+
+    private ArrayList<StatusSignal<Angle>> drivePosition;
+    private ArrayList<Queue<Double>> drivePositionQueue;
+    private ArrayList<StatusSignal<AngularVelocity>> driveVelocity;
+    private ArrayList<StatusSignal<Voltage>> driveVoltage;
+    private ArrayList<StatusSignal<Current>> driveSupplyCurrentAmps;
+    private ArrayList<StatusSignal<Current>> driveTorqueCurrentAmps;
+    private ArrayList<StatusSignal<Temperature>> driveTemperatureCel;
+
+    private final VelocityTorqueCurrentFOC driveVelocityRequest = new VelocityTorqueCurrentFOC(0);
+    private final VoltageOut driveVoltageRequest = new VoltageOut(0);
+
+
+    private final SideConfigsReal sideConfigs;
+
+    public SideIOReal(SideConfigsReal sideConfigs, String name) {
+        this.sideConfigs = sideConfigs;
+        motors = new ArrayList<>(sideConfigs.motorNumber());
+        talonFxConfigs = new ArrayList<>(sideConfigs.motorNumber());
+        drivePosition = new ArrayList<>(sideConfigs.motorNumber());
+        drivePositionQueue = new ArrayList<>(sideConfigs.motorNumber());
+        driveVelocity = new ArrayList<>(sideConfigs.motorNumber());
+        driveVoltage = new ArrayList<>(sideConfigs.motorNumber());
+        driveSupplyCurrentAmps = new ArrayList<>(sideConfigs.motorNumber());
+        driveTorqueCurrentAmps = new ArrayList<>(sideConfigs.motorNumber());
+        driveTemperatureCel = new ArrayList<>(sideConfigs.motorNumber());
+
+        configureMotors();
+
+        for (int i = 0; i < sideConfigs.motorNumber(); i++) {
+            sideConfigs.motors.set(i, new TalonFX(sideConfigs.motorId.get(i), sideConfigs.canivoreCanBusName));
+            motors.add(sideConfigs.motors.get(i));
+        }
+        for (int i = 0; i < sideConfigs.motorNumber(); i++) {
+            talonFxConfigs.set(i, new TalonFXConfiguration());
+        }
+        if (syncThread == null)
+            syncThread = new PhoenixSynchronizationThread(syncLock, sideConfigs.odometryFrequency);
+    }
+
+    public static void startSyncThread() {
+        if (syncThread != null && !syncThread.isAlive())
+            syncThread.start();
+    }
+
+    
+
+
+    private void configureMotors(){
+        for (int i = 0; i < sideConfigs.motorNumber(); i++) {
+            int finalI = i; // new effectively final variable
+    
+            talonFxConfigs.get(finalI).MotorOutput.Inverted = 
+            sideConfigs.motorInverted.get(i) ? InvertedValue.Clockwise_Positive : InvertedValue.CounterClockwise_Positive;
+            talonFxConfigs.get(finalI).CurrentLimits.StatorCurrentLimitEnable = true;
+            talonFxConfigs.get(finalI).CurrentLimits.StatorCurrentLimit = sideConfigs.driveStatorCurrentLimit.in(Amps);
+            talonFxConfigs.get(finalI).MotorOutput.NeutralMode = NeutralModeValue.Brake;
+    
+            PhoenixUtils.tryUntilOk(5, ()-> motors.get(finalI).getConfigurator().apply(talonFxConfigs.get(finalI)));
+            motors.get(i).getConfigurator().apply(talonFxConfigs.get(i));
+            motors.get(i).optimizeBusUtilization();
+
+            drivePosition.set(i, motors.get(i).getPosition());
+            driveVelocity.set(i, motors.get(i).getVelocity());
+            driveVoltage.set(i, motors.get(i).getMotorVoltage());
+            driveSupplyCurrentAmps.set(i, motors.get(i).getSupplyCurrent());
+            driveTorqueCurrentAmps.set(i, motors.get(i).getStatorCurrent());
+            driveTemperatureCel.set(i, motors.get(i).getDeviceTemp());
+
+            drivePosition.get(i).setUpdateFrequency(100.0);
+            driveVelocity.get(i).setUpdateFrequency(100.0);
+
+            driveVoltage.get(i).setUpdateFrequency(50.0);
+            driveSupplyCurrentAmps.get(i).setUpdateFrequency(50.0);
+            driveTorqueCurrentAmps.get(i).setUpdateFrequency(50.0);
+
+            driveTemperatureCel.get(i).setUpdateFrequency(10.0);
+
+            if (syncThread != null && drivePosition != null) {
+                drivePositionQueue.set(i, syncThread.registerSignal(drivePosition.get(i).clone()));
+            }
+            
+        }
+        if (drivePositionQueue == null) {
+            drivePositionQueue = new ArrayList<>();
+        }
+    }
+
+    @Override
+    public void updateInputs(SideIOInputs[] inputs) {
+        for(int i = 0; i < sideConfigs.motorNumber(); i++){
+            inputs[i].sideMotorConnected = BaseStatusSignal.isAllGood(
+                drivePosition.get(i), driveVelocity.get(i), driveVoltage.get(i),
+                 driveSupplyCurrentAmps.get(i), driveTorqueCurrentAmps.get(i), driveTemperatureCel.get(i));
+            inputs[i].sideMotorPositionRad = driveMotorRotationsToMechanismRad(driveVelocity.get(i).getValueAsDouble());
+            inputs[i].sideMotorVelocityRadPerSec = driveMotorRotationsPerSecToMechanismRadPerSec(driveVelocity.get(i).getValueAsDouble());
+            inputs[i].sideMotorTemperatureCel = driveTemperatureCel.get(i).getValueAsDouble();
+            inputs[i].sideMotorVoltageVolt = driveVoltage.get(i).getValueAsDouble();
+            inputs[i].sideMotorSupplyCurrentAmpere = driveSupplyCurrentAmps.get(i).getValueAsDouble();
+            inputs[i].sideMotorTorqueCurrentAmpere = driveTorqueCurrentAmps.get(i).getValueAsDouble();
+
+            if (drivePositionQueue != null && !drivePositionQueue.isEmpty()) {
+                inputs[i].sideMotorPositionRadSamples = drivePositionQueue.get(i).stream().mapToDouble(
+                        this::driveMotorRotationsToMechanismRad).toArray();
+                drivePositionQueue.get(i).clear();
+            } else {
+                inputs[i].sideMotorPositionRadSamples = new double[]{inputs[i].sideMotorPositionRad};
+            }
+    
+        }
+    }
+    
+
+    @Override
+    public void configSideController(double kp, double ki, double kd, double ks, double kv, double ka) {
+        // Configure both PID and FF parameters in single config to avoid overwriting
+        for(int i = 0; i < sideConfigs.motorNumber(); i++){
+            talonFxConfigs.get(i).Slot0.kP = kp;
+            talonFxConfigs.get(i).Slot0.kI = ki;
+            talonFxConfigs.get(i).Slot0.kD = kd;
+            talonFxConfigs.get(i).Slot0.kS = ks;
+            talonFxConfigs.get(i).Slot0.kV = kv;
+            talonFxConfigs.get(i).Slot0.kA = ka;
+            motors.get(i).getConfigurator().apply(talonFxConfigs.get(i).Slot0);
+        }
+    }
+    
+    @Override
+    public void configDriveBrake(boolean isBreak) {
+        for(int i = 0; i < sideConfigs.motorNumber(); i++){
+            motors.get(i).setNeutralMode(isBreak ? NeutralModeValue.Brake : NeutralModeValue.Coast);
+        }
+    }
+
+    @Override
+    public void setDriveOpenLoop(Voltage voltage) {
+        for(int i = 0; i < sideConfigs.motorNumber(); i++){
+            motors.get(i).setControl(driveVoltageRequest.withOutput(voltage.in(Volt)));
+        }
+    }
+
+    @Override
+    public void setDriveVelocity(LinearVelocity des) {
+        double velocityRps = linearVelocityToWheelRPS(des.in(MetersPerSecond));
+        for(int i = 0; i < sideConfigs.motorNumber(); i++){
+            motors.get(i).setControl(driveVelocityRequest.withVelocity(velocityRps * sideConfigs.gearRatio));
+        }
+    }
+
+    @Override
+    public void setDriveVelocity(LinearVelocity des, Current ff) {
+        double velocityRps = linearVelocityToWheelRPS(des.in(MetersPerSecond));
+        for(int i = 0; i < sideConfigs.motorNumber(); i++){
+            motors.get(i).setControl(driveVelocityRequest.withVelocity(velocityRps * sideConfigs.gearRatio).withFeedForward(ff.in(Amps)));
+        }
+    }
+    
+
+    // ========== UNIT CONVERSION METHODS ==========
+
+    /*
+     * CONVERSION OVERVIEW:
+     *
+     * This tank side motors uses TalonFX motors with gear reduction for both drive and steering.
+     * The interface expects wheel/mechanism units, but the motors need motor shaft units.
+     *
+     * Drive System:
+     * - Motor shaft -> [gear ratio] -> Wheel
+     * - Higher gear ratio = motor spins faster than wheel
+     * - Example: 6.14:1 gear ratio means motor rotates 6.14 times per wheel rotation
+     *
+     */
+
+    // ========== DRIVE MOTOR CONVERSIONS ==========
+
+    /**
+     * Convert drive motor rotations to wheel position in radians.
+     * <p>
+     * Flow: Motor rotations -> Wheel radians
+     * Math: motor_rot * (2π rad/rot) / gear_ratio = wheel_rad
+     *
+     * @param motorRotations Raw motor encoder rotations
+     * @return Wheel position in radians
+     */
+    private double driveMotorRotationsToMechanismRad(double motorRotations) {
+        return Units.rotationsToRadians(motorRotations) / sideConfigs.gearRatio;
+    }
+
+    /**
+     * Convert drive motor rotations per second to wheel angular velocity in rad/s.
+     * <p>
+     * Flow: Motor RPS -> Wheel rad/s
+     * Math: motor_rps * (2π rad/rot) / gear_ratio = wheel_rad_per_sec
+     *
+     * @param motorRotationsPerSec Raw motor velocity in rotations per second
+     * @return Wheel angular velocity in rad/s
+     */
+    private double driveMotorRotationsPerSecToMechanismRadPerSec(double motorRotationsPerSec) {
+        return Units.rotationsToRadians(motorRotationsPerSec) / sideConfigs.gearRatio;
+    }
+
+    /**
+     * Convert linear velocity to wheel rotations per second.
+     * <p>
+     * Flow: Linear velocity (m/s) -> Wheel RPS
+     * Math: linear_vel / (wheel_diameter * π) = wheel_rps
+     * <p>
+     * This is used at the interface level - gear ratio is applied when commanding motors.
+     *
+     * @param linearVelocityMPS Linear velocity in meters per second
+     * @return Wheel rotations per second
+     */
+    private double linearVelocityToWheelRPS(double linearVelocityMPS) {
+        double wheelCircumference = sideConfigs.wheelDiameter.in(Meter) * Math.PI;
+        return linearVelocityMPS / wheelCircumference;
+    }
+
+}
+    
+
+
+
+==== robot\TankDrive\Side\SideIOSim.java ====
+package frc.robot.TankDrive.Side;
+//Finished, if anychange needed, please contact, rather than just editing the file.
+import static edu.wpi.first.units.Units.KilogramSquareMeters;
+import static edu.wpi.first.units.Units.Meter;
+import static edu.wpi.first.units.Units.MetersPerSecond;
+import static edu.wpi.first.units.Units.RotationsPerSecond;
+
+import java.util.ArrayList;
+import edu.wpi.first.math.controller.PIDController;
+import edu.wpi.first.math.controller.SimpleMotorFeedforward;
+import edu.wpi.first.math.system.plant.LinearSystemId;
+import edu.wpi.first.units.measure.AngularVelocity;
+import edu.wpi.first.units.measure.Distance;
+import edu.wpi.first.units.measure.LinearVelocity;
+import edu.wpi.first.units.measure.Voltage;
+import edu.wpi.first.wpilibj.simulation.DCMotorSim;
+import frc.robot.TankDrive.TankConfigs.SideConfigsSim;
+import frc.utils.Logging;
+
+import static edu.wpi.first.units.Units.Volt;
+
+public class SideIOSim implements SideIO {
+    private final SideConfigsSim sideConfigs;
+
+    private ArrayList<DCMotorSim> motorSims;
+    private double[] driverMotorAppliedVoltage;
+
+    private PIDController pidController;
+    private SimpleMotorFeedforward driveFF;
+    private boolean isDriveCloseLoop = false;
+
+    public SideIOSim(SideConfigsSim sideConfigs, String name){
+        this.sideConfigs = sideConfigs;
+
+        motorSims = new ArrayList<>(sideConfigs.motorNumber());
+        driverMotorAppliedVoltage = new double[sideConfigs.motorNumber()];
+
+        // 2. fill with dummy objects so set(i, ...) works
+        for (int i = 0; i < sideConfigs.motorNumber(); i++) {
+            motorSims.add(null);
+        }
+        initializeControllers();
+        initializePlants();
+
+    }
+    
+    private void initializePlants() {
+        for (int i = 0; i < sideConfigs.motorNumber(); i++) {
+            motorSims.set(i, new DCMotorSim(
+                LinearSystemId.createDCMotorSystem(
+                    sideConfigs.motors.get(i),
+                    sideConfigs.momentOfInertia.get(i).in(KilogramSquareMeters),
+                    sideConfigs.gearRatio),
+                sideConfigs.motors.get(i),
+                sideConfigs.driveStdDevPos,
+                sideConfigs.driveStdDevVel));
+        }
+    }
+
+    private void initializeControllers() {
+        pidController = new PIDController(0,0,0);
+        driveFF = new SimpleMotorFeedforward(0,0,0);
+        pidController.reset();
+    }
+    
+    @Override
+    public void updateInputs(SideIOInputs[] inputs) {
+        for (int i = 0; i < sideConfigs.motorNumber(); i++) {
+            motorSims.get(i).update(sideConfigs.deltaTimeInSeconds);
+            inputs[i].sideMotorConnected = true;
+            inputs[i].sideMotorPositionRad = motorSims.get(i).getAngularPositionRad();
+            inputs[i].sideMotorPositionRadSamples = new double[] {inputs[i].sideMotorPositionRad};
+            inputs[i].sideMotorVelocityRadPerSec = motorSims.get(i).getAngularVelocityRadPerSec();
+            inputs[i].sideMotorTemperatureCel = 25.0;
+            inputs[i].sideMotorVoltageVolt = driverMotorAppliedVoltage[i];
+            inputs[i].sideMotorSupplyCurrentAmpere = motorSims.get(i).getCurrentDrawAmps();
+            inputs[i].sideMotorTorqueCurrentAmpere = 
+            motorSims.get(i).getTorqueNewtonMeters() / sideConfigs.motors.get(i).KtNMPerAmp;
+
+            motorSims.get(i).setInputVoltage(inputs[i].sideMotorVoltageVolt);
+            motorSims.get(i).update(sideConfigs.deltaTimeInSeconds);
+        }
+    }
+
+    @Override
+    public void setDriveOpenLoop(Voltage des) {
+        isDriveCloseLoop = false;
+        for (int i = 0; i < sideConfigs.motorNumber(); i++) {
+            driverMotorAppliedVoltage[i] = des.in(Volt);
+        }
+    }
+
+    @Override
+    public void setDriveVelocity(LinearVelocity des) {
+        if (!isDriveCloseLoop) {
+            isDriveCloseLoop = true;
+            pidController.reset();
+        }
+        Distance distancePerRotation = sideConfigs.wheelDiameter.times(Math.PI);
+        AngularVelocity angularVelocityDes = RotationsPerSecond.of(
+                des.in(MetersPerSecond) / distancePerRotation.in(Meter));
+        for (int i = 0; i < sideConfigs.motorNumber(); i++) {
+            double fb = pidController.calculate(
+                motorSims.get(i).getAngularVelocityRadPerSec() / (2 * Math.PI), angularVelocityDes.in(RotationsPerSecond));
+            double ff = driveFF.calculate(angularVelocityDes.in(RotationsPerSecond));
+            driverMotorAppliedVoltage[i] = fb + ff;
+        }
+    }
+
+    @Override
+    public void configSideController(double kp, double ki, double kd, double ks, double kv, double ka) {
+        pidController.setPID(kp, ki, kd);
+        driveFF = new SimpleMotorFeedforward(ks, kv, ka);
+        Logging.info(
+                sideConfigs.name + "Side",
+                "Side drive controller updated! kp: %.2f, ki: %.2f, kd: %.2f",
+                kp, ki, kd
+        );
+    }
+
+}
+
+
+==== utils\LoggedTracer.java ====
+// Copyright (c) 2025 FRC 6328
+// http://github.com/Mechanical-Advantage
+//
+// Use of this source code is governed by an MIT-style
+// license that can be found in the LICENSE file at
+// the root directory of this project.
+
+package frc.utils;
+
+import edu.wpi.first.wpilibj.Timer;
+import org.littletonrobotics.junction.Logger;
+
+/**
+ * Utility class for logging code execution times.
+ */
+public class LoggedTracer {
+    private static double startTime = -1.0;
+
+    private LoggedTracer() {
+    }
+
+    /**
+     * Reset the clock.
+     */
+    public static void reset() {
+        startTime = Timer.getFPGATimestamp();
+    }
+
+    /**
+     * Save the time elapsed since the last reset or record.
+     */
+    public static void record(String epochName) {
+        double now = Timer.getFPGATimestamp();
+        Logger.recordOutput("LoggedTracer/" + epochName + "MS", (now - startTime) * 1000.0);
+        startTime = now;
+    }
+}
+
+==== utils\Logging.java ====
+package frc.utils;
+//Use this as utils class for logging in robot code.
+import edu.wpi.first.wpilibj.DriverStation;
+import edu.wpi.first.wpilibj.Timer;
+import lombok.Setter;
+
+public class Logging {
+    private static final String RESET = "\u001B[0m";
+    private static final String BLUE = "\u001B[34m";
+    private static final String GREEN = "\u001B[32m";
+    private static final String YELLOW = "\u001B[33m";
+    private static final String RED = "\u001B[31m";
+    private static final String PURPLE = "\u001B[35m";
+    @Setter
+    private static String printFormat = "[MT %matchStage% %matchTime%][RT %rioTime%][%level%][%tag%] %msg%\n";
+    @Setter
+    private static Level filterLevel = Level.DEBUG;
+
+    private static boolean shouldLog(Level level) {
+        return level.ordinal() >= filterLevel.ordinal();
+    }
+
+    private static String colorize(Level level, String text) {
+        return switch (level) {
+            case DEBUG -> BLUE + text + RESET;
+            case INFO -> GREEN + text + RESET;
+            case WARNING -> YELLOW + text + RESET;
+            case ERROR -> RED + text + RESET;
+            case CRITICAL -> PURPLE + text + RESET;
+        };
+    }
+
+    public static void log(Level level, String tag, String format, Object... arguments) {
+        if (!shouldLog(level)) return;
+
+        String formattedMessage = String.format(format, arguments);
+        String threadName = Thread.currentThread().getName();
+        double rioTime = Timer.getFPGATimestamp();
+        double matchTime = Timer.getMatchTime();
+        String matchStage = DriverStation.isAutonomousEnabled() ? "Auto" : DriverStation.isTeleopEnabled() ? "Tele" : "Prep";
+
+        String output = printFormat
+                .replace("%matchStage%", matchStage)
+                .replace("%matchTime%", String.format("%.4f", matchTime))
+                .replace("%rioTime%", String.format("%.4f", rioTime))
+                .replace("%level%", colorize(level, level.name()))
+                .replace("%tag%", colorize(level, tag))
+                .replace("%thread%", threadName)
+                .replace("%msg%", formattedMessage);
+
+        System.out.print(output);
+    }
+
+    // Convenience methods
+    public static void debug(String tag, String format, Object... args) {
+        log(Level.DEBUG, tag, format, args);
+    }
+
+    public static void info(String tag, String format, Object... args) {
+        log(Level.INFO, tag, format, args);
+    }
+
+    public static void warn(String tag, String format, Object... args) {
+        log(Level.WARNING, tag, format, args);
+    }
+
+    public static void error(String tag, String format, Object... args) {
+        log(Level.ERROR, tag, format, args);
+    }
+
+    public static void critical(String tag, String format, Object... args) {
+        log(Level.CRITICAL, tag, format, args);
+    }
+
+    public enum Level {
+        DEBUG,
+        INFO,
+        WARNING,
+        ERROR,
+        CRITICAL
+    }
+}
+
+
+==== utils\PhoenixSynchronizationThread.java ====
+// Copyright (c) 2025 FRC 6328
+// http://github.com/Mechanical-Advantage
+//
+// Use of this source code is governed by an MIT-style
+// license that can be found in the LICENSE file at
+// the root directory of this project.
+//Use this as utils
+
+package frc.utils;
+
+import com.ctre.phoenix6.BaseStatusSignal;
+import com.ctre.phoenix6.CANBus;
+import com.ctre.phoenix6.StatusSignal;
+import edu.wpi.first.units.measure.Angle;
+import edu.wpi.first.units.measure.Frequency;
+import edu.wpi.first.wpilibj.RobotController;
+import edu.wpi.first.wpilibj.Threads;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Queue;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.DoubleSupplier;
+
+import static edu.wpi.first.units.Units.Hertz;
+
+/**
+ * Adapted from https://github.com/Mechanical-Advantage/RobotCode2025Public/blob/main/src/main/java/org/littletonrobotics/frc2025/subsystems/drive/PhoenixOdometryThread.java
+ * <p>
+ * Provides an interface for asynchronously reading high-frequency measurements to a set of queues.
+ *
+ * <p>This version is intended for Phoenix 6 devices on both the RIO and CANivore buses. When using
+ * a CANivore, the thread uses the "waitForAll" blocking method to enable more consistent sampling.
+ * This also allows Phoenix Pro users to benefit from lower latency between devices using CANivore
+ * time synchronization.
+ */
+public class PhoenixSynchronizationThread extends Thread {
+    private static boolean isCANFD = new CANBus("*").isNetworkFD();
+    private final Lock signalsLock = new ReentrantLock(); // Prevents conflicts when registering signals
+    private final Lock userLock;
+    private final double frequency;
+    private final List<DoubleSupplier> genericSignals = new ArrayList<>();
+    private final List<Queue<Double>> phoenixQueues = new ArrayList<>();
+    private final List<Queue<Double>> genericQueues = new ArrayList<>();
+    private final List<Queue<Double>> timestampQueues = new ArrayList<>();
+    private BaseStatusSignal[] phoenixSignals = new BaseStatusSignal[0];
+
+    public PhoenixSynchronizationThread(Lock lock, Frequency frequency) {
+        setName("PhoenixOdometryThread");
+        setDaemon(true);
+        this.userLock = lock;
+        this.frequency = frequency.in(Hertz);
+    }
+
+    @Override
+    public void start() {
+        if (phoenixQueues.size() > 0 || timestampQueues.size() > 0) {
+            super.start();
+        }
+    }
+
+    /**
+     * Registers a Phoenix signal to be read from the thread.
+     */
+    public Queue<Double> registerSignal(StatusSignal<Angle> signal) {
+        Queue<Double> queue = new ArrayBlockingQueue<>(20);
+        signalsLock.lock();
+        userLock.lock();
+        try {
+            BaseStatusSignal[] newSignals = new BaseStatusSignal[phoenixSignals.length + 1];
+            System.arraycopy(phoenixSignals, 0, newSignals, 0, phoenixSignals.length);
+            newSignals[phoenixSignals.length] = signal;
+            phoenixSignals = newSignals;
+            phoenixQueues.add(queue);
+        } finally {
+            signalsLock.unlock();
+            userLock.unlock();
+        }
+        return queue;
+    }
+
+    /**
+     * Registers a generic signal to be read from the thread.
+     */
+    public Queue<Double> registerSignal(DoubleSupplier signal) {
+        Queue<Double> queue = new ArrayBlockingQueue<>(20);
+        signalsLock.lock();
+        userLock.lock();
+        try {
+            genericSignals.add(signal);
+            genericQueues.add(queue);
+        } finally {
+            signalsLock.unlock();
+            userLock.unlock();
+        }
+        return queue;
+    }
+
+    /**
+     * Returns a new queue that returns timestamp values for each sample.
+     */
+    public Queue<Double> makeTimestampQueue() {
+        Queue<Double> queue = new ArrayBlockingQueue<>(20);
+        userLock.lock();
+        try {
+            timestampQueues.add(queue);
+        } finally {
+            userLock.unlock();
+        }
+        return queue;
+    }
+
+    @Override
+    public void run() {
+        // DO NOT COPY UNLESS YOU UNDERSTAND THE CONSEQUENCES
+        // https://docs.advantagekit.org/getting-started/template-projects/spark-swerve-template#real-time-thread-priority
+        Threads.setCurrentThreadPriority(true, 1);
+
+        while (true) {
+            // Wait for updates from all signals
+            signalsLock.lock();
+            try {
+                if (isCANFD && phoenixSignals.length > 0) {
+                    BaseStatusSignal.waitForAll(2.0 / frequency, phoenixSignals);
+                } else {
+                    // "waitForAll" does not support blocking on multiple signals with a bus
+                    // that is not CAN FD, regardless of Pro licensing. No reasoning for this
+                    // behavior is provided by the documentation.
+                    Thread.sleep((long) (1000.0 / frequency));
+                    if (phoenixSignals.length > 0) BaseStatusSignal.refreshAll(phoenixSignals);
+                }
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            } finally {
+                signalsLock.unlock();
+            }
+
+            // Save new data to queues
+            userLock.lock();
+            try {
+                // Sample timestamp is current FPGA time minus average CAN latency
+                //     Default timestamps from Phoenix are NOT compatible with
+                //     FPGA timestamps, this solution is imperfect but close
+                double timestamp = RobotController.getFPGATime() / 1e6;
+                double totalLatency = 0.0;
+                for (BaseStatusSignal signal : phoenixSignals) {
+                    totalLatency += signal.getTimestamp().getLatency();
+                }
+                if (phoenixSignals.length > 0) {
+                    timestamp -= totalLatency / phoenixSignals.length;
+                }
+
+                // Add new samples to queues
+                for (int i = 0; i < phoenixSignals.length; i++) {
+                    phoenixQueues.get(i).offer(phoenixSignals[i].getValueAsDouble());
+                }
+                for (int i = 0; i < genericSignals.size(); i++) {
+                    genericQueues.get(i).offer(genericSignals.get(i).getAsDouble());
+                }
+                for (int i = 0; i < timestampQueues.size(); i++) {
+                    timestampQueues.get(i).offer(timestamp);
+                }
+            } finally {
+                userLock.unlock();
+            }
+        }
+    }
+} 
+
+==== utils\PhoenixUtils.java ====
+// Copyright (c) 2025 FRC 6328
+// http://github.com/Mechanical-Advantage
+//
+// Use of this source code is governed by an MIT-style
+// license that can be found in the LICENSE file at
+// the root directory of this project.
+
+//Use this as utils
+package frc.utils;
+
+import com.ctre.phoenix6.BaseStatusSignal;
+import com.ctre.phoenix6.StatusCode;
+
+import java.util.function.Supplier;
+
+public class PhoenixUtils {
+    /** Attempts to run the command until no error is produced. */
+    public static void tryUntilOk(int maxAttempts, Supplier<StatusCode> command) {
+        for (int i = 0; i < maxAttempts; i++) {
+            var error = command.get();
+            if (error.isOK()) break;
+        }
+    }
+
+    /** Signals for synchronized refresh. */
+    private static BaseStatusSignal[] canivoreSignals = new BaseStatusSignal[0];
+
+    private static BaseStatusSignal[] rioSignals = new BaseStatusSignal[0];
+
+    /** Registers a set of signals for synchronized refresh. */
+    public static void registerSignals(boolean canivore, BaseStatusSignal... signals) {
+        if (canivore) {
+            BaseStatusSignal[] newSignals = new BaseStatusSignal[canivoreSignals.length + signals.length];
+            System.arraycopy(canivoreSignals, 0, newSignals, 0, canivoreSignals.length);
+            System.arraycopy(signals, 0, newSignals, canivoreSignals.length, signals.length);
+            canivoreSignals = newSignals;
+        } else {
+            BaseStatusSignal[] newSignals = new BaseStatusSignal[rioSignals.length + signals.length];
+            System.arraycopy(rioSignals, 0, newSignals, 0, rioSignals.length);
+            System.arraycopy(signals, 0, newSignals, rioSignals.length, signals.length);
+            rioSignals = newSignals;
+        }
+    }
+
+    /** Refresh all registered signals. */
+    public static void refreshAll() {
+        if (canivoreSignals.length > 0) {
+            BaseStatusSignal.refreshAll(canivoreSignals);
+        }
+        if (rioSignals.length > 0) {
+            BaseStatusSignal.refreshAll(rioSignals);
+        }
+    }
+}
+

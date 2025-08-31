@@ -232,7 +232,7 @@ public class TankSubsystem extends SubsystemBase {
         public void runVelocity(DifferentialDriveWheelSpeeds velocity) {
             mode = MODE.VELOCITY;
             currentSetPoint = setPointGenerator.generate(velocity, currentSetPoint, 0.02);
-
+        
             sides.getFirst().runVelocity(MetersPerSecond.of(currentSetPoint.wheelSpeeds().leftMetersPerSecond));
             sides.getSecond().runVelocity(MetersPerSecond.of(currentSetPoint.wheelSpeeds().rightMetersPerSecond));
         }

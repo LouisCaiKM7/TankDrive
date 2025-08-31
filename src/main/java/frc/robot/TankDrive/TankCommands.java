@@ -47,26 +47,37 @@ public class TankCommands {
             DoubleUnaryOperator angularCurve
     ) {
         return Commands.run(() -> {
-            
-            // apply curves + deadband
-            double lin = MathUtil.applyDeadband(
-                    linearCurve.applyAsDouble(linearSpeedSupplier.getAsDouble()),
-                    linearDeadband.in(MetersPerSecond)
-            ) * maxLinear.in(MetersPerSecond);
+            // Get raw joystick inputs
+            double rawLin = linearSpeedSupplier.getAsDouble();
+            double rawAng = angularSpeedSupplier.getAsDouble();
 
-            double ang = MathUtil.applyDeadband(
-                    angularCurve.applyAsDouble(angularSpeedSupplier.getAsDouble()),
-                    angularDeadband.in(RadiansPerSecond)
-            ) * maxAngular.in(RadiansPerSecond);
-            System.out.printf("lin=%.2f  ang=%.2f%n", lin, ang);
-            System.out.println(linearSpeedSupplier.getAsDouble() +" "+ angularSpeedSupplier.getAsDouble());
-            // convert to wheel speeds
+            // Apply curves
+            double curvedLin = linearCurve.applyAsDouble(rawLin);
+            double curvedAng = angularCurve.applyAsDouble(rawAng);
+
+            // Apply deadband
+            double lin = MathUtil.applyDeadband(curvedLin, linearDeadband.in(MetersPerSecond)) * maxLinear.in(MetersPerSecond);
+            double ang = MathUtil.applyDeadband(curvedAng, angularDeadband.in(RadiansPerSecond)) * maxAngular.in(RadiansPerSecond);
+
+            // Ensure the speeds are zero when the joystick inputs are zero
+            if (Math.abs(rawLin) < linearDeadband.in(MetersPerSecond) && Math.abs(rawAng) < angularDeadband.in(RadiansPerSecond)) {
+                lin = 0.0;
+                ang = 0.0;
+            }
+
+            // Convert to wheel speeds
             ChassisSpeeds speeds = new ChassisSpeeds(lin, 0, ang);
-            DifferentialDriveWheelSpeeds wheelSpeeds =
-                    tank.getKinematics().toWheelSpeeds(speeds);
-            System.out.println(wheelSpeeds.leftMetersPerSecond + " " + wheelSpeeds.rightMetersPerSecond);
+            DifferentialDriveWheelSpeeds wheelSpeeds = tank.getKinematics().toWheelSpeeds(speeds);
 
+            // Run the tank subsystem with the new wheel speeds
             tank.runVelocity(wheelSpeeds);
+
+            // Debugging output
+            System.out.println(Math.abs(rawLin) < linearDeadband.in(MetersPerSecond) && Math.abs(rawAng) < angularDeadband.in(RadiansPerSecond));
+            System.out.println("Raw lin: " + rawLin + ", Raw ang: " + rawAng);
+            System.out.println("Curved lin: " + curvedLin + ", Curved ang: " + curvedAng);
+            System.out.println("Processed lin: " + lin + ", Processed ang: " + ang);
+            System.out.println("Wheel speeds: Left: " + wheelSpeeds.leftMetersPerSecond + ", Right: " + wheelSpeeds.rightMetersPerSecond);
         }, tank);
     }
 
