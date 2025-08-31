@@ -6,7 +6,6 @@ import edu.wpi.first.wpilibj2.command.Commands;
 import edu.wpi.first.wpilibj2.command.button.CommandXboxController;
 import frc.robot.TankDrive.TankCommands;
 import frc.robot.TankDrive.TankSubsystem;
-import frc.robot.TankDrive.Side.Side;
 import frc.robot.TankDrive.Side.SideIOReal;
 import frc.robot.TankDrive.Side.SideIOSim;
 import frc.robot.TankDrive.Imu.ImuIOPigeon2;

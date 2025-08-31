@@ -1,6 +1,5 @@
 package frc.robot.TankDrive.Side;
 //Finished, if anychange needed, please contact, rather than just editing the file.
-import static edu.wpi.first.units.Units.MetersPerSecond;
 
 import org.littletonrobotics.junction.AutoLog;
 

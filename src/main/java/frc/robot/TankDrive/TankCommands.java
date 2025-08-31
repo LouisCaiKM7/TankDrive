@@ -14,10 +14,7 @@ import frc.robot.TankDrive.Commands.TankFollowPathPlannerCommand;
 import frc.robot.TankDrive.Commands.TankFollowTrajectoryCommand;
 
 import java.util.function.*;
-import java.util.logging.Logger;
-
 import com.pathplanner.lib.events.Event;
-import com.pathplanner.lib.path.PathPlannerPath;
 import com.pathplanner.lib.trajectory.PathPlannerTrajectory;
 
 import edu.wpi.first.math.trajectory.Trajectory;

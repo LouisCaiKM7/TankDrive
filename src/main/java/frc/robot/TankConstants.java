@@ -15,7 +15,6 @@ import edu.wpi.first.math.Pair;
 import edu.wpi.first.math.system.plant.DCMotor;
 import frc.robot.TankDrive.TankConfigs;
 import frc.robot.TankDrive.TankLimits;
-import frc.robot.TankDrive.TankConfigs.SideConfigs;
 import frc.robot.TankDrive.TankConfigs.SideConfigsReal;
 import frc.robot.TankDrive.TankConfigs.SideConfigsSim;
 // do not touch this file, we havn't arrived yet

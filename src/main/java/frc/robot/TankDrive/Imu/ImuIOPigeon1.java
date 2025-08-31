@@ -9,7 +9,6 @@ import edu.wpi.first.math.geometry.Rotation2d;
 import edu.wpi.first.math.geometry.Rotation3d;
 import edu.wpi.first.units.Units;
 import edu.wpi.first.wpilibj.Timer;
-import frc.robot.TankDrive.TankConfigs;
 import frc.robot.TankDrive.TankConfigs.SideConfigsReal;
 
 public class ImuIOPigeon1 implements ImuIO{

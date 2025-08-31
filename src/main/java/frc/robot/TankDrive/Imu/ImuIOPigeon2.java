@@ -11,7 +11,6 @@ import edu.wpi.first.math.geometry.Rotation3d;
 import edu.wpi.first.units.Units;
 import edu.wpi.first.units.measure.Angle;
 import edu.wpi.first.units.measure.AngularVelocity;
-import frc.robot.TankDrive.TankConfigs;
 import frc.robot.TankDrive.Side.SideIOReal;
 import frc.robot.TankDrive.TankConfigs.SideConfigsReal;
 import frc.utils.PhoenixSynchronizationThread;
