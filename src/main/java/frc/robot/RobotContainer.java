@@ -1,11 +1,15 @@
 package frc.robot;
 
 import edu.wpi.first.math.Pair;
+import edu.wpi.first.math.controller.PIDController;
+import edu.wpi.first.math.geometry.Pose2d;
+import edu.wpi.first.math.geometry.Pose3d;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.Commands;
 import edu.wpi.first.wpilibj2.command.button.CommandXboxController;
 import frc.robot.TankDrive.TankCommands;
 import frc.robot.TankDrive.TankSubsystem;
+import frc.robot.TankDrive.Commands.TankDriveToPoseCommand;
 import frc.robot.TankDrive.Side.SideIOReal;
 import frc.robot.TankDrive.Side.SideIOSim;
 import frc.robot.TankDrive.Imu.ImuIOPigeon2;
@@ -57,6 +61,20 @@ public class RobotContainer {
 
         /* "A" button stops the robot */
         controller.a().whileTrue(TankCommands.stop(tankSubsystem));
+
+        controller.b().onTrue(TankCommands.resetPose(tankSubsystem, new Pose3d()));
+
+        controller.x().whileTrue(TankCommands.driveToPose(
+            tankSubsystem, ()->tankSubsystem.getEstimatedPose().toPose2d(),
+             ()->new Pose2d(), new PIDController(
+                AimToPoseTranslationPIDNT.kP.getValue(),
+                AimToPoseTranslationPIDNT.kI.getValue(),
+                AimToPoseTranslationPIDNT.kD.getValue()),
+              new PIDController(
+                AimToPoseRotationPIDNT.kP.getValue(),
+                AimToPoseRotationPIDNT.kI.getValue(),
+                AimToPoseRotationPIDNT.kD.getValue()
+              ), Meters.of(0.1), Degrees.of(1.7)));
     }
 
     /* ---------- Auto placeholder ---------- */

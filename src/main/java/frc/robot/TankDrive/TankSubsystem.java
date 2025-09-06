@@ -44,9 +44,6 @@ public class TankSubsystem extends SubsystemBase {
     private final DifferentialDrivePoseEstimator3d poseEstimatorUsingGyro;
     private DifferentialDriveWheelPositions wheelPositions;
         private final TankPoseEstimator tankPoseEstimator;
-        @Getter
-        private TankSetPoint currentSetPoint;
-            private final TankSetPointGenerator setPointGenerator;
             private final TankConfigs configs;
             private final Pair<Side, Side> sides;
             private final ImuIO imuIO;
@@ -71,8 +68,8 @@ public class TankSubsystem extends SubsystemBase {
                     new Side(configs.sides.getFirst(), sideIOs.getFirst()),
                     new Side(configs.sides.getSecond(), sideIOs.getSecond())
                 );
-                this.currentSetPoint = new TankSetPoint(new DifferentialDriveWheelSpeeds(0.0d, 0.0d));
-                this.setPointGenerator = TankSetPointGenerator.builder().limits(configs.tankLimits).build();
+                // this.currentSetPoint = new TankSetPoint(new DifferentialDriveWheelSpeeds(0.0d, 0.0d));
+                // this.setPointGenerator = TankSetPointGenerator.builder().limits(configs.tankLimits).build();
                 this.useGyro = !(state == TankDrivingStates.PURE_DRIVE);
         
                 if (useGyro) {
@@ -147,8 +144,8 @@ public class TankSubsystem extends SubsystemBase {
             Logger.recordOutput(configs.name + "/leftSpeed", getWheelSpeeds().leftMetersPerSecond);
             Logger.recordOutput(configs.name + "/rightSpeed", getWheelSpeeds().rightMetersPerSecond);
 
-            Logger.recordOutput(configs.name + "/desiredveloleft", currentSetPoint.wheelSpeeds().leftMetersPerSecond);
-            Logger.recordOutput(configs.name + "/desiredveloright", currentSetPoint.wheelSpeeds().rightMetersPerSecond);
+            // Logger.recordOutput(configs.name + "/desiredveloleft", currentSetPoint.wheelSpeeds().leftMetersPerSecond);
+            // Logger.recordOutput(configs.name + "/desiredveloright", currentSetPoint.wheelSpeeds().rightMetersPerSecond);
         }
     
     
@@ -230,17 +227,26 @@ public class TankSubsystem extends SubsystemBase {
         }
         public void runVelocity(DifferentialDriveWheelSpeeds velocity) {
             mode = MODE.VELOCITY;
-            currentSetPoint = setPointGenerator.generate(velocity, currentSetPoint, 0.02);
+            sides.getFirst().runVelocity(MetersPerSecond.of(configs.tankLimits.apply(velocity, velocity, 0.02).getFirst().leftMetersPerSecond));
+            sides.getSecond().runVelocity(MetersPerSecond.of(configs.tankLimits.apply(velocity, velocity, 0.02).getFirst().rightMetersPerSecond));
+            
+
+            // currentSetPoint = setPointGenerator.generate(velocity, currentSetPoint, 0.02);
         
-            sides.getFirst().runVelocity(MetersPerSecond.of(currentSetPoint.wheelSpeeds().leftMetersPerSecond));
-            sides.getSecond().runVelocity(MetersPerSecond.of(currentSetPoint.wheelSpeeds().rightMetersPerSecond));
+            // sides.getFirst().runVelocity(MetersPerSecond.of(currentSetPoint.wheelSpeeds().leftMetersPerSecond));
+            // sides.getSecond().runVelocity(MetersPerSecond.of(currentSetPoint.wheelSpeeds().rightMetersPerSecond));
         }
         public void runVelocity(DifferentialDriveWheelSpeeds velocity, Pair<Current, Current> tou){
             mode = MODE.VELOCITY;
-            currentSetPoint = setPointGenerator.generate(velocity, currentSetPoint, 0.02);
 
-            sides.getFirst().runVelocity(MetersPerSecond.of(currentSetPoint.wheelSpeeds().leftMetersPerSecond), tou.getFirst());
-            sides.getSecond().runVelocity(MetersPerSecond.of(currentSetPoint.wheelSpeeds().rightMetersPerSecond), tou.getSecond());
+            sides.getFirst().runVelocity(MetersPerSecond.of(configs.tankLimits.apply(velocity, velocity, 0.02).getFirst().leftMetersPerSecond),tou.getFirst());
+            sides.getSecond().runVelocity(MetersPerSecond.of(configs.tankLimits.apply(velocity, velocity, 0.02).getFirst().rightMetersPerSecond), tou.getSecond());
+            
+
+            // currentSetPoint = setPointGenerator.generate(velocity, currentSetPoint, 0.02);
+
+            // sides.getFirst().runVelocity(MetersPerSecond.of(currentSetPoint.wheelSpeeds().leftMetersPerSecond), tou.getFirst());
+            // sides.getSecond().runVelocity(MetersPerSecond.of(currentSetPoint.wheelSpeeds().rightMetersPerSecond), tou.getSecond());
             
         }
 
@@ -249,15 +255,11 @@ public class TankSubsystem extends SubsystemBase {
         }
     
         public TankLimits getTankLimit(){
-            return setPointGenerator.getLimits();
+            return configs.tankLimits;
         }
 
-        public void setTankLimit(TankLimits tankLimits){
-            setPointGenerator.setLimits(tankLimits);
-        }
-
-        public void setTankLimitDefult(){
-            setPointGenerator.setLimits(configs.tankLimits);
+        public Pose3d getEstimatedPose() {
+            return tankPoseEstimator.getPose();
         }
 
         public DifferentialDriveKinematics getKinematics() {

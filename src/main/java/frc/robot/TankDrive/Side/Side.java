@@ -46,7 +46,7 @@ public class Side {
     }
 
 
-    private void updateDriveController() {
+    public void updateDriveController() {
         double kp = TankParamsNT.kP.getValue();
         double ki = TankParamsNT.kI.getValue();
         double kd = TankParamsNT.kD.getValue();

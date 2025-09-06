@@ -70,11 +70,11 @@ public class TankCommands {
             tank.runVelocity(wheelSpeeds);
 
             // Debugging output
-            System.out.println(Math.abs(rawLin) < linearDeadband.in(MetersPerSecond) && Math.abs(rawAng) < angularDeadband.in(RadiansPerSecond));
-            System.out.println("Raw lin: " + rawLin + ", Raw ang: " + rawAng);
-            System.out.println("Curved lin: " + curvedLin + ", Curved ang: " + curvedAng);
-            System.out.println("Processed lin: " + lin + ", Processed ang: " + ang);
-            System.out.println("Wheel speeds: Left: " + wheelSpeeds.leftMetersPerSecond + ", Right: " + wheelSpeeds.rightMetersPerSecond);
+            // System.out.println(Math.abs(rawLin) < linearDeadband.in(MetersPerSecond) && Math.abs(rawAng) < angularDeadband.in(RadiansPerSecond));
+            // System.out.println("Raw lin: " + rawLin + ", Raw ang: " + rawAng);
+            // System.out.println("Curved lin: " + curvedLin + ", Curved ang: " + curvedAng);
+            // System.out.println("Processed lin: " + lin + ", Processed ang: " + ang);
+            // System.out.println("Wheel speeds: Left: " + wheelSpeeds.leftMetersPerSecond + ", Right: " + wheelSpeeds.rightMetersPerSecond);
         }, tank);
     }
 
@@ -98,8 +98,8 @@ public class TankCommands {
     /* ---------- 3. Drive to pose ---------- */
     public static Command driveToPose(
             TankSubsystem tank,
-            Supplier<Pose3d> robotPoseSupplier,
-            Supplier<Pose3d> targetPoseSupplier,
+            Supplier<Pose2d> robotPoseSupplier,
+            Supplier<Pose2d> targetPoseSupplier,
             PIDController linController,
             PIDController rotController,
             Distance translationTolerance,

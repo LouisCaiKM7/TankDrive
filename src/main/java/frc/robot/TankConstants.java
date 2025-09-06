@@ -30,6 +30,18 @@ public class TankConstants {
         public static final double kV = 0.01;
         public static final double kS = 0.0;
     }
+    @NTParameter(tableName = "Params/TankTranslationPID")
+    public static final class AimToPoseTranslationPID{
+        public static final double kP = 2.0;
+        public static final double kI = 0.0;
+        public static final double kD = 0.0;
+    }
+    @NTParameter(tableName = "Params/TankRotationPID")
+    public static final class AimToPoseRotationPID{
+        public static final double kP = 2.0;
+        public static final double kI = 0.0;
+        public static final double kD = 0.0;
+    }
     public static final SideConfigsReal leftReal = SideConfigsReal.builder()
         .name("Left")
         .deltaTimeInSeconds(0.02)
