@@ -17,8 +17,9 @@ import static edu.wpi.first.units.Units.Meters;
 import static edu.wpi.first.units.Units.Radians;
 
 /**
- * 三步走：转向目标点 → 直线开（可倒）→ 转最终角
- * 死区强制停车 + 关掉 I 项，防止到位后晃
+ * 严格符号版：
+ * 顺时针为负，逆时针为正
+ * case 行为完全匹配你给的表格
  */
 public class TankDriveToPoseCommand extends Command {
 
@@ -33,7 +34,10 @@ public class TankDriveToPoseCommand extends Command {
     private enum State { TURN_TO_POINT, DRIVE_TO_POINT, TURN_TO_FINAL }
     private State state = State.TURN_TO_POINT;
 
-    private double dx, dy, dist, angleToPoint, angleErr;
+    /* 每周期复用 */
+    private double dx, dy, dist, angleToPoint;
+    /* 当前选的方向标志：false=正向（v=-v），true=反向（v=+v） */
+    private boolean driveReverse;
 
     public TankDriveToPoseCommand(TankSubsystem tank,
                                   Supplier<Pose2d> robotPose,
@@ -57,8 +61,9 @@ public class TankDriveToPoseCommand extends Command {
     public void initialize() {
         xController.reset();
         thetaController.reset();
-        thetaController.setI(0);          // ****** 关掉 I，防止积分晃 ******
-        state = State.TURN_TO_POINT;
+        thetaController.setI(0);
+        state        = State.TURN_TO_POINT;
+        driveReverse = false;
     }
 
     @Override
@@ -76,30 +81,44 @@ public class TankDriveToPoseCommand extends Command {
         dx           = goal.getX() - cur.getX();
         dy           = goal.getY() - cur.getY();
         dist         = Math.hypot(dx, dy);
-        angleToPoint = Math.atan2(dy, dx);
-
-        /* ****** 只归一化一次，交给 enableContinuousInput 走最短弧 ******/
-        angleErr = thetaController.calculate(cur.getRotation().getRadians(), angleToPoint);
+        angleToPoint = Math.atan2(dy, dx);   // 逆时针为正，顺时针为负
 
         switch (state) {
             case TURN_TO_POINT:
-                System.out.printf("TURN angleErr=%.4f  tol=%.4f%n", angleErr, angleTol.in(Radians));
+                double rawErr = angleToPoint - cur.getRotation().getRadians();
+                /* ****** 用 ±90° 界限判断哪边更近 ******/
+                if (Math.abs(rawErr) > Math.PI / 2) {          // >90° 才考虑倒车
+                    double revErr = rawErr - Math.copySign(Math.PI, rawErr);   // 朝反方向
+                    if (Math.abs(revErr) < Math.abs(rawErr)) {
+                        driveReverse = true;
+                        angleToPoint = angleToPoint - Math.copySign(Math.PI, rawErr);   // 翻目标线
+                    } else {
+                        driveReverse = false;   // 尽管>90°，但原方向更近
+                    }
+                } else {
+                    driveReverse = false;       // ≤90° 直接正走
+                }
 
-                /* ****** 放大死区 + 强制停车 ******/
-                if (Math.abs(angleErr) < 0.08) {          // 0.08 rad ≈ 5°
+                double angleErr = thetaController.calculate(cur.getRotation().getRadians(), angleToPoint);
+                System.out.printf("TURN angleErr=%.4f  rev=%s  tol=%.4f%n", angleErr, driveReverse, angleTol.in(Radians));
+
+                if (Math.abs(angleErr) < angleTol.in(Radians)) {
                     tank.runVelocity(tank.getKinematics().toWheelSpeeds(new ChassisSpeeds(0, 0, 0)));
                     state = State.DRIVE_TO_POINT;
                     break;
                 }
 
-                tank.runVelocity(tank.getKinematics().toWheelSpeeds(new ChassisSpeeds(0, 0, angleErr)));
+                double omega = thetaController.calculate(cur.getRotation().getRadians(), angleToPoint);
+                tank.runVelocity(tank.getKinematics().toWheelSpeeds(new ChassisSpeeds(0, 0, omega)));
                 break;
-
             case DRIVE_TO_POINT:
                 double v = xController.calculate(dist, 0);
-                v = -v;                       // 你要的倒着走
-                double omega = thetaController.calculate(cur.getRotation().getRadians(), angleToPoint);
-                tank.runVelocity(tank.getKinematics().toWheelSpeeds(new ChassisSpeeds(v, 0, omega)));
+                /* 根据选的方向给符号：reverse=true → 正速度（倒着开） */
+                v = driveReverse ? v : -v;
+
+                /* 行驶中保持车头朝目标线 */
+                double omegaDrive = thetaController.calculate(cur.getRotation().getRadians(), angleToPoint);
+                tank.runVelocity(tank.getKinematics().toWheelSpeeds(new ChassisSpeeds(v, 0, 0)));
 
                 if (dist < transTol.in(Meters)) {
                     state = State.TURN_TO_FINAL;
@@ -107,9 +126,10 @@ public class TankDriveToPoseCommand extends Command {
                 break;
 
             case TURN_TO_FINAL:
-                angleErr = thetaController.calculate(cur.getRotation().getRadians(), goal.getRotation().getRadians());
-                tank.runVelocity(tank.getKinematics().toWheelSpeeds(new ChassisSpeeds(0, 0, angleErr)));
-                if (Math.abs(angleErr) < 0.08) {
+                /* ****** 转到最终目标角 ******/
+                double finalErr = thetaController.calculate(cur.getRotation().getRadians(), goal.getRotation().getRadians());
+                tank.runVelocity(tank.getKinematics().toWheelSpeeds(new ChassisSpeeds(0, 0, finalErr)));
+                if (Math.abs(finalErr) < angleTol.in(Radians)) {
                     end(false);
                 }
                 break;
